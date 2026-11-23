@@ -43,6 +43,7 @@ import {
   useSourceEpisodes,
   useSourceGroup,
   useSourceItem,
+  useSourceLeagueEvents,
   useSourceOwnerAvailable,
   useSourceScan,
   useSourceSearch,
@@ -115,11 +116,7 @@ export function SourceProfileAction({
                     kind,
                     item.id,
                     profileId,
-                    item.kind === "show"
-                      ? "show"
-                      : item.kind === "episode"
-                        ? "episode"
-                        : "movie",
+                    item.kind,
                   ),
                 )
                 .catch(() => undefined);
@@ -139,14 +136,16 @@ export function SourceMovieActions({ item }: { item: SourceItem }) {
   const search = useSourceSearch();
   const scan = useSourceScan();
   const available = useSourceOwnerAvailable(item);
-  const ready =
+  const canManage =
     (item.effective_profile_id !== undefined
       ? item.effective_profile_id
       : item.profile_id) !== null &&
     !item.server_missing &&
     available &&
-    !item.arr_shadow &&
-    ["identified", "parsed"].includes(item.identity_state);
+    !item.arr_shadow;
+  const ready =
+    canManage && ["identified", "parsed"].includes(item.identity_state);
+  const manualReady = item.kind === "sports_event" ? canManage : ready;
   return (
     <Stack gap="xs">
       <Group gap="xs">
@@ -160,7 +159,7 @@ export function SourceMovieActions({ item }: { item: SourceItem }) {
         </Toolbox.Button>
         <Toolbox.Button
           icon={faSearch}
-          disabled={!ready}
+          disabled={!manualReady}
           onClick={() =>
             modals.openContextModal(SourceManualSearchModal, { item })
           }
@@ -177,7 +176,7 @@ export function SourceMovieActions({ item }: { item: SourceItem }) {
         </Toolbox.Button>
         <Toolbox.Button
           icon={faCloudUploadAlt}
-          disabled={!ready}
+          disabled={!manualReady}
           onClick={() => modals.openContextModal(SourceUploadModal, { item })}
         >
           Upload
@@ -352,7 +351,7 @@ export function SourceSubtitleTable({ item }: { item: SourceItem }) {
 }
 
 function SourceEpisodeView({ item }: { item: SourceItem }) {
-  const query = useSourceItem(item.id, "episode");
+  const query = useSourceItem(item.id, item.kind);
   const current = query.data ?? item;
   return (
     <QueryOverlay result={query}>
@@ -369,6 +368,89 @@ const SourceEpisodeModal = withModal(SourceEpisodeView, "source-episode", {
   title: "Episode",
   size: "xl",
 });
+
+const SourceSportsEventModal = withModal(
+  SourceEpisodeView,
+  "source-sports-event",
+  {
+    title: "Event",
+    size: "xl",
+  },
+);
+
+function SourceLeagueEvents({ id }: { id: number }) {
+  const query = useSourceLeagueEvents(id);
+  const modals = useModals();
+  const seasons = useMemo(() => {
+    const grouped = new Map<number | null, SourceItem[]>();
+    for (const event of query.data ?? []) {
+      const season = grouped.get(event.season) ?? [];
+      season.push(event);
+      grouped.set(event.season, season);
+    }
+    return [...grouped.entries()].sort(([a], [b]) => (b ?? -1) - (a ?? -1));
+  }, [query.data]);
+  const columns = useMemo<ColumnDef<SourceItem>[]>(
+    () => [
+      {
+        header: "Event",
+        accessorKey: "title",
+        cell: ({ row: { original: event } }) => (
+          <Anchor
+            component="button"
+            className="table-primary"
+            onClick={() =>
+              modals.openContextModal(
+                SourceSportsEventModal,
+                { item: event },
+                { title: event.title },
+              )
+            }
+          >
+            {event.title}
+          </Anchor>
+        ),
+      },
+      { header: "Round", accessorKey: "episode" },
+      { header: "Part", accessorKey: "part_name" },
+      { header: "Date", accessorKey: "event_date" },
+      {
+        header: "Missing Subtitles",
+        id: "missing",
+        cell: ({ row }) => (
+          <Group gap="xs">
+            {row.original.missing_subtitles.map((language, index) => (
+              <Badge key={index} color="yellow">
+                <Language.Text value={language} />
+              </Badge>
+            ))}
+          </Group>
+        ),
+      },
+    ],
+    [modals],
+  );
+  return (
+    <QueryOverlay result={query}>
+      <Stack>
+        {query.isError && <Alert color="red">{sourceError(query.error)}</Alert>}
+        {query.isSuccess && seasons.length === 0 && <Text>No events</Text>}
+        {seasons.map(([season, events]) => (
+          <Stack key={season ?? "unknown"} gap="xs">
+            <Text component="h2" fw={600}>
+              {season === null ? "Unknown season" : `Season ${season}`}
+            </Text>
+            <SimpleTable
+              columns={columns}
+              data={events}
+              getRowId={(event) => `source:${event.id}`}
+            />
+          </Stack>
+        ))}
+      </Stack>
+    </QueryOverlay>
+  );
+}
 
 function EpisodeList({ id }: { id: number }) {
   const [page, setPage] = useState(1);
@@ -537,6 +619,39 @@ export function SourceSeriesDetailView() {
               <EpisodeList key={id} id={id} />
             </Stack>
           </>
+        )}
+      </QueryOverlay>
+    </Container>
+  );
+}
+
+export function SourceLeagueDetailView() {
+  const id = validId(useParams().id);
+  const query = useSourceGroup(id, "league");
+  const item = query.data;
+  useDocumentTitle(
+    `${item?.title ?? "Unknown League"} - ${useAppTitle()} (Sports)`,
+  );
+  if (!Number.isFinite(id) || (item && item.kind !== "league"))
+    return <Navigate to="/not-found" />;
+  return (
+    <Container fluid px={0}>
+      <nav aria-label="Breadcrumb">
+        <Breadcrumbs mb="md" ml="xs">
+          <Anchor component={Link} to="/sports" size="sm">
+            Sports
+          </Anchor>
+          <Text size="sm">{item?.title ?? "Loading..."}</Text>
+        </Breadcrumbs>
+      </nav>
+      <QueryOverlay result={query}>
+        {query.isError && <Alert color="red">{sourceError(query.error)}</Alert>}
+        {item && (
+          <Stack>
+            <SourceDetailBadge item={item} />
+            <ItemOverview item={asOverview(item)} />
+            <SourceLeagueEvents id={id} />
+          </Stack>
         )}
       </QueryOverlay>
     </Container>

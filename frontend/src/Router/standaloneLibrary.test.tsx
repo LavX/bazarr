@@ -13,7 +13,6 @@ import { openSelect } from "@/tests/select";
 import { useRoutes } from ".";
 
 function LibraryRoutes() {
-  // eslint-disable-next-line testing-library/no-node-access -- route definition, not DOM children.
   return useRouterRoutes(useRoutes()[0].children ?? []);
 }
 
@@ -136,7 +135,8 @@ describe.each([
             ...(!onlyAttention && (!keys.length || keys.includes("arr:5"))
               ? [arrRow]
               : []),
-            ...(params.get("sources") === "1" &&
+            ...(visible &&
+            params.get("sources") === "1" &&
             (!onlyAttention || attention) &&
             (!keys.length || keys.includes(`source:${sourceId}`))
               ? [sourceRow]
@@ -226,13 +226,10 @@ describe.each([
         await screen.findByRole("link", { name: "Archive title" }),
       ).toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "Toggle filters" }));
-      const ownerFilter = await openSelect(user, "Filter by source...");
-      await user.click(
-        within(ownerFilter).getByRole("option", {
-          name: "Archive",
-          hidden: true,
-        }),
-      );
+      const owners = screen.getByPlaceholderText("Filter by source...");
+      await user.click(owners);
+      await user.type(owners, "Archive");
+      await user.keyboard("{ArrowDown}{Enter}");
       await waitFor(() =>
         expect(list).toHaveBeenLastCalledWith(
           "1",
@@ -302,7 +299,7 @@ describe.each([
       await waitFor(() => expect(scanSource).toHaveBeenCalledOnce());
     });
 
-    it("preserves the Arr-only list and keeps source filters out when sources are hidden", async () => {
+    it("preserves the Arr-only list and keeps source filters out with no sources", async () => {
       const { list } = setup({ visible: false });
       const user = userEvent.setup();
       renderLibrary(`/${kind}`);
@@ -315,7 +312,7 @@ describe.each([
       expect(
         screen.queryByRole("columnheader", { name: "Source" }),
       ).not.toBeInTheDocument();
-      expect(list).toHaveBeenCalledWith(null, [], null);
+      expect(list).toHaveBeenCalledWith("1", [], null);
       await user.click(screen.getByRole("button", { name: "Toggle filters" }));
       expect(
         screen.queryByRole("checkbox", { name: "Needs attention" }),

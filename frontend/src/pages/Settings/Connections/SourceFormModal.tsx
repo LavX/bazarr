@@ -170,14 +170,17 @@ export default function SourceFormModal({
                 disabled={!newLibrary}
                 onChange={(event) => {
                   const value = event.currentTarget.value;
-                  if (value === "movie" || value === "series") setKind(value);
+                  if (
+                    value === "movie" ||
+                    value === "series" ||
+                    value === "sports"
+                  )
+                    setKind(value);
                 }}
                 data={[
                   { value: "movie", label: CONTENT_KIND_LABELS.movie },
                   { value: "series", label: CONTENT_KIND_LABELS.series },
-                  ...(kind === "sports"
-                    ? [{ value: "sports", label: CONTENT_KIND_LABELS.sports }]
-                    : []),
+                  { value: "sports", label: CONTENT_KIND_LABELS.sports },
                 ]}
               />
               <TextInput

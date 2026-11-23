@@ -102,7 +102,7 @@ interface Props<T extends Item.Base = Item.Base> {
   getRowId?: (item: T) => string;
   tagValues?: string[];
   onTagValuesChange?: (values: string[]) => void;
-  enableRowSelection?: boolean;
+  enableRowSelection?: boolean | ((row: Row<T>) => boolean);
   onSelectionChanged?: (selections: T[]) => void;
   selectionToolbar?: ReactNode;
   profileToolbar?: ReactNode;

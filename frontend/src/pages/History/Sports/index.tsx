@@ -22,22 +22,26 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { CellContext, ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import {
+  sportsActivityLink,
   SportsActivityRow,
+  sportsRowOwner,
   useSportsAction,
+  useSportsActivityScope,
   useSportsAvailability,
   useSportsHistoryPagination,
 } from "@/apis/hooks/sports";
-import {
-  HistoryIcon,
-  InstanceBadge,
-  SportsJobFeedback,
-} from "@/components/bazarr";
+import { HistoryIcon, SportsJobFeedback } from "@/components/bazarr";
 import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
-import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
+import {
+  sourceDetailApi,
+  sourceError,
+  useSourceWrite,
+} from "@/pages/SourceDetail/api";
 import HistoryView from "@/pages/views/HistoryView";
 import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
 
@@ -66,21 +70,22 @@ const EXCLUDE_PROMPT =
 // Defined once, so the columns being rebuilt never remount an open menu.
 const SportsPlayCell = ({
   row: { original },
-}: CellContext<SportsActivityRow, unknown>) => (
-  <PlayOnMenu
-    mediaType="sports"
-    id={original.event_id}
-    itemLabel={original.title}
-    variant="action"
-  />
-);
+}: CellContext<SportsActivityRow, unknown>) =>
+  original.origin === "source" ? null : (
+    <PlayOnMenu
+      mediaType="sports"
+      id={original.event_id}
+      itemLabel={original.title}
+      variant="action"
+    />
+  );
 
 const SportsHistoryView: FunctionComponent = () => {
-  const { activity, arrEnabled, isLoading } = useSportsAvailability();
+  const { activity, arrEnabled, sourceActivity, isLoading } =
+    useSportsAvailability();
   const [params] = useSearchParams();
-  const owner = params.get("instance")
-    ? Number(params.get("instance"))
-    : undefined;
+  const { owner, includeSources, sourceKeys, labels } =
+    useSportsActivityScope();
   const eventId = params.get("event_id")
     ? Number(params.get("event_id"))
     : undefined;
@@ -100,6 +105,8 @@ const SportsHistoryView: FunctionComponent = () => {
 
   const query = useSportsHistoryPagination({
     owner,
+    includeSources,
+    sourceKeys,
     eventId,
     leagueId,
     language,
@@ -108,6 +115,7 @@ const SportsHistoryView: FunctionComponent = () => {
     includeEmbedded,
   });
   const run = useSportsAction();
+  const excludeSource = useSourceWrite();
   const {
     multiInstance,
     nameById: instanceNameById,
@@ -123,27 +131,28 @@ const SportsHistoryView: FunctionComponent = () => {
       {
         header: "Name",
         accessorKey: "title",
-        cell: ({ row: { original } }) => (
-          <Anchor
-            className="table-primary"
-            component={Link}
-            to={`/sports/${original.league_id}?instance=${original.arr_instance_id}`}
-          >
-            {original.title}
-          </Anchor>
-        ),
+        cell: ({ row: { original } }) => {
+          const link = sportsActivityLink(original);
+          if (!link) return <Text size="sm">{original.title}</Text>;
+          return (
+            <Anchor className="table-primary" component={Link} to={link}>
+              {original.title}
+            </Anchor>
+          );
+        },
       },
       { id: "play", cell: SportsPlayCell },
-      ...(multiInstance
+      ...(multiInstance || sourceActivity
         ? [
             {
               id: "instance",
-              header: "Instance",
+              header: sourceActivity ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
-                <InstanceBadge
-                  instanceId={original.arr_instance_id}
-                  defaultId={instanceDefaultId}
-                  nameById={instanceNameById}
+                <SourceBadge
+                  row={sportsRowOwner(original)}
+                  labels={labels}
+                  defaultArr={instanceDefaultId}
+                  arrNames={instanceNameById}
                 />
               ),
             } as ColumnDef<SportsActivityRow>,
@@ -234,7 +243,12 @@ const SportsHistoryView: FunctionComponent = () => {
           if (
             ![1, 2, 3].includes(original.action ?? -1) ||
             !original.provider ||
-            !original.subs_id
+            !original.subs_id ||
+            (original.origin === "source" &&
+              (!original.source_id ||
+                !original.source_item_id ||
+                !original.subtitles_path ||
+                !original.language_key))
           ) {
             return null;
           }
@@ -255,12 +269,17 @@ const SportsHistoryView: FunctionComponent = () => {
         },
       },
     ],
-    [multiInstance, instanceNameById, instanceDefaultId],
+    [
+      multiInstance,
+      sourceActivity,
+      labels,
+      instanceNameById,
+      instanceDefaultId,
+    ],
   );
 
   if (isLoading) return null;
-  if (!arrEnabled && activity) return <FolderMediaNotice />;
-  if (!arrEnabled) {
+  if (!activity) {
     return (
       <Container px={0} fluid>
         <Text p="md">
@@ -276,6 +295,7 @@ const SportsHistoryView: FunctionComponent = () => {
         name="Sports"
         query={query}
         columns={columns}
+        getRowId={(row) => `${row.origin ?? "arr"}:${row.id}`}
         toolbar={
           <Stack gap="xs" mb="xs">
             <SportsActivityFilters
@@ -295,7 +315,7 @@ const SportsHistoryView: FunctionComponent = () => {
                   }))}
                 />
               }
-              actionLabel="Search upgrades"
+              actionLabel={arrEnabled ? "Search upgrades" : undefined}
               actionLoading={run.isPending}
               onAction={(selected) =>
                 run.mutate({ path: "/upgrade", owner: selected })
@@ -321,24 +341,58 @@ const SportsHistoryView: FunctionComponent = () => {
         centered
       >
         <Stack>
-          <Text>{EXCLUDE_PROMPT}</Text>
+          <Text>
+            {pending?.origin === "source"
+              ? "Delete the currently indexed subtitle at this path and exclude this provider release for source sports events?"
+              : EXCLUDE_PROMPT}
+          </Text>
+          {excludeSource.isError && (
+            <Text c="red">{sourceError(excludeSource.error)}</Text>
+          )}
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setPending(null)}>
               Cancel
             </Button>
             <Button
               color="red"
-              loading={run.isPending}
-              onClick={() =>
-                pending &&
+              loading={run.isPending || excludeSource.isPending}
+              onClick={() => {
+                if (!pending) return;
+                if (pending.origin === "source") {
+                  const {
+                    source_item_id: id,
+                    source_id: sourceId,
+                    subtitles_path: path,
+                    language_key: key,
+                    provider,
+                    subs_id: releaseId,
+                  } = pending;
+                  if (id && sourceId && path && key && provider && releaseId) {
+                    excludeSource.mutate(
+                      () =>
+                        sourceDetailApi.excludeSubtitle(
+                          id,
+                          sourceId,
+                          path,
+                          key,
+                          provider,
+                          releaseId,
+                        ),
+                      {
+                        onSuccess: () => setPending(null),
+                      },
+                    );
+                  }
+                  return;
+                }
                 run.mutate(
                   {
                     path: `/history/${pending.id}/blacklist`,
                     owner: pending.arr_instance_id,
                   },
                   { onSuccess: () => setPending(null) },
-                )
-              }
+                );
+              }}
             >
               Exclude release
             </Button>

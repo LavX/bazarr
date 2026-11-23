@@ -196,6 +196,8 @@ def _delete_item_subtitle(item_id, args, blacklist=None):
     source, refusal = _manual_target(item_id)
     if refusal:
         return refusal
+    if args.get('source_id') is not None and args['source_id'] != source.source_id:
+        return {'message': 'The source item no longer belongs to this source.'}, 409
     try:
         removed = delete_subtitles(source.media_type, args['language'], args['forced'], args['hi'],
                                    source.path, args['subtitles_path'], source=source, blacklist=blacklist)
@@ -296,6 +298,7 @@ class SourceItemBlacklist(Resource):
     post_request_parser = _delete_args()
     post_request_parser.add_argument('provider', type=str, required=True, nullable=False)
     post_request_parser.add_argument('subs_id', type=str, required=True, nullable=False)
+    post_request_parser.add_argument('source_id', type=int, nullable=False)
 
     @authenticate
     @api_ns_sources_items.doc(parser=post_request_parser)

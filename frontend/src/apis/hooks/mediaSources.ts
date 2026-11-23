@@ -12,18 +12,11 @@ import { useSystemSettings } from "./system";
 
 export const mediaSourcesKey = [QueryKeys.System, "media-sources"] as const;
 
-export function useMediaSourcesVisible() {
-  const { data } = useSystemSettings();
-  return data?.media_sources?.visible === true;
-}
-
 export function useMediaSources() {
-  const visible = useMediaSourcesVisible();
   return useQuery({
     queryKey: mediaSourcesKey,
     queryFn: ({ signal }) =>
       withInlineErrors(() => api.mediaSources.list(signal)),
-    enabled: visible,
   });
 }
 
@@ -91,8 +84,8 @@ function isSourceKey(value: string | null): value is MediaSourceKey {
 
 export function useSourceFilter(
   kind: SourceContentKind,
-  arr: "sonarr" | "radarr",
-  { includeDisabledSources = false } = {},
+  arr: "sonarr" | "radarr" | "sportarr",
+  { includeDisabledSources = false, clearOnChange = [] as string[] } = {},
 ) {
   const [params, setParams] = useSearchParams();
   const arrLabels = useArrInstanceLabels(arr);
@@ -107,12 +100,12 @@ export function useSourceFilter(
         : [],
     [data, isEnabled, kind],
   );
-  const includeSources = settings?.media_sources?.visible === true;
   const enabledArr = settings?.general?.[`use_${arr}`] === true;
   const arrConfigured =
     enabledArr &&
     (arrLabels.enabledOptions.length > 0 ||
       (arrLabels.options.length === 0 &&
+        arr !== "sportarr" &&
         Boolean(
           settings?.[arr]?.ip?.trim() && settings?.[arr]?.apikey?.trim(),
         )));
@@ -145,9 +138,7 @@ export function useSourceFilter(
 
   const legacy = params.get("instance");
   const sourceParam = params.get("source");
-  const scopedSource =
-    includeSources || sourceParam?.startsWith("arr:") ? sourceParam : null;
-  const key = scopedSource ?? (legacy ? `arr:${legacy}` : null);
+  const key = sourceParam ?? (legacy ? `arr:${legacy}` : null);
   const selected = isSourceKey(key) ? key : null;
 
   const sourceKeys = useMemo<MediaSourceKey[]>(() => {
@@ -164,8 +155,8 @@ export function useSourceFilter(
   }, [arrConfigured, selected, sources]);
 
   return {
-    includeSources,
-    showBadge: includeSources ? labels.size > 1 : arrLabels.multiInstance,
+    includeSources: true,
+    showBadge: labels.size > 1,
     labels,
     sourceKeys,
     arrActions: sources.length === 0 || arrConfigured,
@@ -176,6 +167,7 @@ export function useSourceFilter(
       const next = new URLSearchParams(params);
       next.delete("instance");
       next.delete("page");
+      clearOnChange.forEach((param) => next.delete(param));
       if (isSourceKey(value)) next.set("source", value);
       else next.delete("source");
       setParams(next);

@@ -151,6 +151,69 @@ def _events(session, root, *, name='Local Sports'):
     return source, league, dated, round_id
 
 
+def test_leagues_union_keeps_legacy_owners_and_scopes_group_events(client, arr_library, tmp_path, monkeypatch):
+    import sqlalchemy as sa
+    from app.config import settings
+    from app.database import TableArrInstances, TableSportsLeagues
+    from media_source_helpers import add_item
+    from media_sources import repository
+
+    arr_library.execute(sa.insert(TableArrInstances).values(
+        id=4, kind='sportarr', name='Other Sportarr', stable_key='sportarr-secondary', port=9004,
+        enabled=1, is_default=0, path_mappings='[]'))
+    arr_library.execute(sa.insert(TableSportsLeagues).values(
+        id=2, arr_instance_id=4, sportarrLeagueId=31, title='Other League', sortTitle='other league',
+        monitored='True', path='/other/league'))
+
+    def get(route, **query):
+        response = client.get('/api/' + route, query_string=query, headers=HEADERS)
+        assert response.status_code == 200, response.get_json()
+        return response
+
+    baseline = get('sports/leagues').data
+    assert get('sports/leagues', sources=1).data == baseline
+    assert [row['id'] for row in get('sports/leagues', **{'source_key[]': 'arr:4'}).json['data']] == [2]
+    for route in ('wanted', 'history', 'blacklist'):
+        assert get(f'sports/{route}', **{'source_key[]': 'arr:3'}).json['total'] == 1
+        assert get(f'sports/{route}', **{'source_key[]': 'arr:4'}).json['data'] == []
+        assert get(f'sports/{route}', arr_instance_id=3, **{'source_key[]': 'arr:4'}).json['data'] == []
+
+    owner, league, dated, round_id = _events(arr_library, tmp_path)
+    group = repository.get_group(league, arr_library)
+    early = add_item(arr_library, owner, group.library_id, video(tmp_path / 'earlier.mkv'),
+                     kind='sports_event', group_id=league, title='Earlier Race', event_date='2026-01-01', season=2026)
+    unknown = add_item(arr_library, owner, group.library_id, video(tmp_path / 'unknown.mkv'),
+                       kind='sports_event', group_id=league, title='Unknown Race')
+    other_owner, _, _, _ = _events(arr_library, tmp_path, name='Other Folder')
+    assert get('sports/leagues').data == baseline
+    mixed = get('sports/leagues', sources=1, length=1).json
+    assert mixed['total'] == 4
+    full = get('sports/leagues', sources=1, length=-1).json['data']
+    assert ('arr', 1) in {(row['origin'], row['id']) for row in full}
+    assert ('source', league) in {(row['origin'], row['id']) for row in full}
+    scoped = get('sports/leagues', sources=1, **{'source_key[]': f'source:{owner}'}).json['data']
+    assert len(scoped) == 1 and scoped[0]['source_key'] == f'source:{owner}'
+    assert scoped[0]['eventFileCount'] == 4
+    assert get('sports/leagues', sources=1, arr_instance_id=3, **{'source_key[]': 'arr:4'}).json['data'] == []
+
+    events = get(f'sources/groups/{league}/items').json['data']
+    assert [item['id'] for item in events] == [early, dated, round_id, unknown]
+    assert all(item['kind'] == 'sports_event' and item['group_id'] == league for item in events)
+    assert get(f'sources/groups/{league}', kind='league').json['title'] == 'Z Local League'
+    assert client.get(f'/api/sources/groups/{league}?kind=show', headers=HEADERS).status_code == 404
+    monkeypatch.setattr('api.sources.items.delete_subtitles', lambda *_, **__: pytest.fail('Wrong-owner delete'))
+    exclude = client.post(f'/api/sources/items/{dated}/blacklist', headers=HEADERS, data={
+        'source_id': other_owner, 'subtitles_path': '/fixture/race.en.srt', 'provider': 'fixture',
+        'language': 'en', 'subs_id': 'recorded-release',
+    })
+    assert exclude.status_code == 409
+    hits = get('system/searches', sources=1, query='local league').json
+    assert {hit['detail_url'] for hit in hits} == {f'/sports/source/{row["id"]}' for row in full
+                                                   if row['origin'] == 'source'}
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    assert all(row['origin'] == 'source' for row in get('sports/leagues', sources=1).json['data'])
+
+
 def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_library, tmp_path, monkeypatch):
     from datetime import datetime
     from unittest.mock import Mock

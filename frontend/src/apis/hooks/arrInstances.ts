@@ -78,7 +78,6 @@ export function isArrMediaRouteEnabled(
   instances: ArrInstance[] | undefined,
 ) {
   if (!settings?.general?.[`use_${kind}`]) return false;
-  if (!settings.media_sources?.visible) return true;
   if (!instances) return false;
 
   const available = getArrInstanceAvailability(kind, instances);

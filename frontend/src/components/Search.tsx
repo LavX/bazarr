@@ -37,11 +37,13 @@ function useSearch(query: string) {
       data?.map((v) => {
         const { link, label, poster, type, value } = (() => {
           if (v.origin === "source") {
-            const kind = v.source_kind === "show" ? "series" : "movies";
+            const kind = { show: "series", movie: "movies", league: "sports" }[
+              v.source_kind
+            ];
             return {
               poster: v.poster,
               link: `/${kind}/source/${v.id}`,
-              type: v.source_kind,
+              type: v.source_kind === "league" ? "sports" : v.source_kind,
               label: v.year ? `${v.title} (${v.year})` : v.title,
               value: `source:${v.source_kind}:${v.id}`,
             };

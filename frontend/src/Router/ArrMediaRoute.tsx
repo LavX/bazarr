@@ -15,11 +15,10 @@ export default function ArrMediaRoute({
   sourceBrowsable?: boolean;
 }>) {
   const { data } = useSystemSettings();
-  const visible = data?.media_sources?.visible === true;
   const master = data?.general[`use_${kind}`] === true;
-  const instances = useArrInstances(visible && master);
+  const instances = useArrInstances(master);
   if (!data) return null;
-  if (!visible || sourceBrowsable) return children;
+  if (sourceBrowsable) return children;
   if (master && instances.isLoading) return null;
 
   return isArrMediaRouteEnabled(kind, data, instances.data) ? (

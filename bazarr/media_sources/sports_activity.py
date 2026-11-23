@@ -5,7 +5,7 @@ import sqlalchemy as sa
 from app.config import settings
 from app.database import TableArrInstances, TableBlacklistSports, TableHistorySports, TableSportsEvents, TableSportsLeagues
 from app.event_handler import event_stream
-from sportarr import history, workflows
+from sportarr import history, library, workflows
 from sportarr.pagination import validate_page
 
 from . import repository
@@ -34,6 +34,46 @@ def _mixed_response(page, total, arr, source):
     return {'total': total, 'data': [
         dict(item, origin=row.origin, source_key=row.source_key)
         for row in page if (item := (source if row.origin == 'source' else arr).get(row.id)) is not None]}
+
+
+def list_leagues(session, args, scope, *, arr_instance_id, start, length):
+    groups, items, libraries, sources = repository.Groups, repository.Items, repository.Libraries, repository.Sources
+    leagues = TableSportsLeagues
+    arr_filter = scope.arr(leagues.arr_instance_id)
+    if arr_instance_id is not None or not includes_sources(args, session, groups, groups.c.kind == 'league'):
+        return library.list_leagues(session, arr_instance_id, start, length, **(
+            {'row_filter': arr_filter} if scope.keys else {}))
+
+    validate_page(start, length)
+    arr_query = library.leagues_query().where(arr_filter) if settings.general.use_sportarr else None
+    arr = _project(arr_query, (leagues.id, leagues.arr_instance_id.label('_owner'),
+                               sa.func.coalesce(leagues.sortTitle, leagues.title, '').label('sort_title')))
+    source_query = sa.select(groups.c.id, groups.c.source_id.label('_owner'),
+                             sa.func.coalesce(groups.c.sort_title, groups.c.title, '').label('sort_title')).where(
+        groups.c.kind == 'league', scope.source(groups.c.source_id))
+    page, total = union_page(session, arr, source_query, start=start, length=length, offset_unbounded=True,
+                             sort=lambda c: (c.sort_title, c.origin, c.id))
+    arr_ids, source_ids = _page_ids(page, 'arr'), _page_ids(page, 'source')
+    arr_data = {row['id']: row for row in library.list_leagues(
+        session, length=-1, row_filter=leagues.id.in_(arr_ids))['data']} if arr_ids else {}
+    source_data = {}
+    if source_ids:
+        counts = sa.select(items.c.group_id, sa.func.count().label('files'), sa.func.count(sa.case(
+            (items.c.missing_subtitles.notin_(('', '[]')), 1))).label('missing')).where(
+            items.c.kind == _KIND, items.c.group_id.in_(source_ids)).group_by(items.c.group_id).subquery()
+        details = sa.select(groups.c.id, groups.c.title, groups.c.poster, groups.c.group_key, groups.c.monitored,
+                            sources.c.name.label('source_name'), sources.c.kind.label('source_kind'),
+                            sa.func.coalesce(groups.c.profile_id, libraries.c.profile_id).label('profile_id'),
+                            counts.c.files, counts.c.missing).join(libraries, libraries.c.id == groups.c.library_id
+                            ).join(sources, sources.c.id == groups.c.source_id
+                            ).outerjoin(counts, counts.c.group_id == groups.c.id).where(groups.c.id.in_(source_ids))
+        source_data = {row.id: {
+            'id': row.id, 'title': row.title, 'poster': row.poster, 'source_name': row.source_name,
+            'source_kind': row.source_kind, 'path': row.group_key if row.source_kind == 'folder' else None,
+            'monitored': bool(row.monitored), 'profileId': row.profile_id, 'tags': [], 'audio_language': [],
+            'eventCount': row.files or 0, 'eventFileCount': row.files or 0, 'missingLanguageCount': row.missing or 0,
+        } for row in session.execute(details)}
+    return _mixed_response(page, total, arr_data, source_data)
 
 
 def _source_wanted(row):
@@ -111,9 +151,11 @@ def _source_activity_query(table, scope, *, language, provider, action, include_
 
 def _source_activity(session, table, query, ids):
     items, sources = repository.Items, repository.Sources
-    joined = table.outerjoin(items, table.c.item_id == items.c.id).outerjoin(sources, table.c.source_id == sources.c.id)
+    joined = table.outerjoin(items, sa.and_(table.c.item_id == items.c.id, table.c.source_id == items.c.source_id)
+                            ).outerjoin(sources, table.c.source_id == sources.c.id)
     details = query.with_only_columns(
-        *table.c, items.c.group_id.label('source_group_id'), items.c.season, items.c.episode,
+        *table.c, items.c.id.label('source_item_id'), items.c.group_id.label('source_group_id'), items.c.season,
+        items.c.episode,
         items.c.part_number, items.c.part_name, sources.c.kind.label('source_kind'),
     ).select_from(joined).where(table.c.id.in_(ids))
     is_history = table is repository.History
@@ -121,7 +163,8 @@ def _source_activity(session, table, query, ids):
     rows = {}
     for row in session.execute(details):
         data = dict(row._mapping)
-        data.update(arr_instance_id=None, event_id=None, league_id=None, source_item_id=data.pop('item_id'),
+        data.pop('item_id')
+        data.update(arr_instance_id=None, event_id=None, league_id=None,
                     title=data.pop('item_title'), leagueTitle=data.pop('group_title'),
                     partNumber=data.pop('part_number') or None, partName=data.pop('part_name'))
         data.pop('item_kind')

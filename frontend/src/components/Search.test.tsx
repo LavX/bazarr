@@ -146,6 +146,7 @@ describe("Search Bar", () => {
   it.each([
     { title: "Standalone show", path: "/series/source/101", kind: "show" },
     { title: "Standalone film", path: "/movies/source/101", kind: "movie" },
+    { title: "Standalone league", path: "/sports/source/101", kind: "league" },
   ])(
     "opens $title when source and Arr IDs overlap",
     async ({ title, path, kind }) => {
@@ -168,6 +169,14 @@ describe("Search Bar", () => {
           year: "2021",
           poster: null,
         },
+        {
+          id: 101,
+          origin: "source",
+          source_kind: "league",
+          title: "Standalone league",
+          year: "",
+          poster: null,
+        },
       ]);
 
       await user.type(screen.getByPlaceholderText("Search"), "standalone");
@@ -175,7 +184,7 @@ describe("Search Bar", () => {
       const option = await screen.findByRole("option", {
         name: new RegExp(title),
       });
-      expect(screen.getAllByRole("option")).toHaveLength(3);
+      expect(screen.getAllByRole("option")).toHaveLength(4);
       expect(option).toHaveAttribute("value", `source:${kind}:101`);
       expect(within(option).queryByText("HD Series")).not.toBeInTheDocument();
       expect(within(option).queryByText("HD Movies")).not.toBeInTheDocument();
@@ -185,7 +194,7 @@ describe("Search Bar", () => {
     },
   );
 
-  it("keeps source navigation hidden when the feature is off", async () => {
+  it("shows source navigation with an old settings file", async () => {
     server.use(
       http.get("/api/system/settings", () =>
         HttpResponse.json({
@@ -211,8 +220,8 @@ describe("Search Bar", () => {
       await screen.findByRole("option", { name: /Archive Arr title/ }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("option", { name: /Archive source title/ }),
-    ).not.toBeInTheDocument();
+      await screen.findByRole("option", { name: /Archive source title/ }),
+    ).toBeInTheDocument();
   });
 
   it.each([

@@ -16,17 +16,19 @@ import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
 import {
+  sportsActivityLink,
   SportsActivityRow,
+  sportsRowOwner,
   useRemoveSportsExclusion,
+  useSportsActivityScope,
   useSportsAvailability,
   useSportsBlacklistPagination,
 } from "@/apis/hooks/sports";
 import { QueryPageTable } from "@/components";
 import MutateAction from "@/components/async/MutateAction";
-import { InstanceBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import TextPopover from "@/components/TextPopover";
-import FolderMediaNotice from "@/pages/views/FolderMediaNotice";
 import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
 
 // Built as its own page on the shared paginated table, like the Series and
@@ -34,18 +36,19 @@ import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
 // Wanted and History, so it inherited their columns and none of the paging or
 // styling the other two exclusion pages have.
 const BlacklistSportsView: FunctionComponent = () => {
-  const { activity, arrEnabled, isLoading } = useSportsAvailability();
+  const { activity, sourceActivity, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
-  const owner = params.get("instance")
-    ? Number(params.get("instance"))
-    : undefined;
+  const { owner, includeSources, sourceKeys, labels } =
+    useSportsActivityScope();
   const eventId = params.get("event_id")
     ? Number(params.get("event_id"))
     : undefined;
 
   const [language, setLanguage] = useState("");
   const [provider, setProvider] = useState("");
-  const [confirmClear, setConfirmClear] = useState<number | null>(null);
+  const [confirmClear, setConfirmClear] = useState<
+    number | MediaSourceKey | null
+  >(null);
   // The bulk clear needs its own pending flag. `remove` is one shared mutation
   // object, so keying the Remove All button off remove.isPending made it spin
   // whenever any single row was removed.
@@ -57,6 +60,8 @@ const BlacklistSportsView: FunctionComponent = () => {
 
   const query = useSportsBlacklistPagination({
     owner,
+    includeSources,
+    sourceKeys,
     eventId,
     language,
     provider,
@@ -85,27 +90,26 @@ const BlacklistSportsView: FunctionComponent = () => {
           // events table applies, so two parts of one event read apart here
           // the way they do in the library.
           const label = part ? `${original.title} (${part})` : original.title;
+          const link = sportsActivityLink(original);
+          if (!link) return <Text size="sm">{label}</Text>;
           return (
-            <Anchor
-              className="table-primary"
-              component={Link}
-              to={`/sports/${original.league_id}?instance=${original.arr_instance_id}`}
-            >
+            <Anchor className="table-primary" component={Link} to={link}>
               {label}
             </Anchor>
           );
         },
       },
-      ...(multiInstance
+      ...(multiInstance || sourceActivity
         ? [
             {
               id: "instance",
-              header: "Instance",
+              header: sourceActivity ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
-                <InstanceBadge
-                  instanceId={original.arr_instance_id}
-                  defaultId={instanceDefaultId}
-                  nameById={instanceNameById}
+                <SourceBadge
+                  row={sportsRowOwner(original)}
+                  labels={labels}
+                  defaultArr={instanceDefaultId}
+                  arrNames={instanceNameById}
                 />
               ),
             } as ColumnDef<SportsActivityRow>,
@@ -149,24 +153,32 @@ const BlacklistSportsView: FunctionComponent = () => {
             mutation={remove}
             args={() => {
               setRemovedNotice(false);
-              return {
-                owner: original.arr_instance_id,
-                id: original.id,
-              };
+              return original.origin === "source"
+                ? { origin: "source" as const, id: original.id }
+                : {
+                    owner: original.arr_instance_id,
+                    id: original.id,
+                  };
             }}
             onSuccess={() => setRemovedNotice(true)}
           ></MutateAction>
         ),
       },
     ],
-    [multiInstance, instanceNameById, instanceDefaultId, remove],
+    [
+      multiInstance,
+      sourceActivity,
+      labels,
+      instanceNameById,
+      instanceDefaultId,
+      remove,
+    ],
   );
 
   useDocumentTitle(`Sports Excluded - ${useInstanceName()}`);
 
   if (isLoading) return null;
-  if (!arrEnabled && activity) return <FolderMediaNotice />;
-  if (!arrEnabled) {
+  if (!activity) {
     return (
       <Container px={0} fluid>
         <Text p="md">
@@ -189,6 +201,7 @@ const BlacklistSportsView: FunctionComponent = () => {
           actionDisabled={query.paginationStatus.totalCount === 0}
           actionLoading={clearing}
           onAction={setConfirmClear}
+          onSourceAction={setConfirmClear}
         />
         {removedNotice && (
           <Text size="sm">
@@ -199,6 +212,7 @@ const BlacklistSportsView: FunctionComponent = () => {
           tableStyles={{ emptyText: "Nothing Excluded for Sports" }}
           columns={columns}
           query={query}
+          getRowId={(row) => `${row.origin ?? "arr"}:${row.id}`}
         ></QueryPageTable>
       </Stack>
       <Modal
@@ -209,9 +223,9 @@ const BlacklistSportsView: FunctionComponent = () => {
       >
         <Stack>
           <Text>
-            Allow every excluded release for this instance again? Removing an
-            exclusion does not bring the subtitle back; it makes that release
-            eligible for a future search.
+            {`Allow every excluded release for this ${typeof confirmClear === "string" ? "source" : "instance"} again? `}
+            Removing an exclusion does not bring the subtitle back; it makes
+            that release eligible for a future search.
           </Text>
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setConfirmClear(null)}>
@@ -225,7 +239,9 @@ const BlacklistSportsView: FunctionComponent = () => {
                 setClearing(true);
                 setRemovedNotice(false);
                 remove.mutate(
-                  { owner: confirmClear },
+                  typeof confirmClear === "string"
+                    ? { origin: "source", sourceKey: confirmClear }
+                    : { owner: confirmClear },
                   {
                     onSuccess: () => {
                       setConfirmClear(null);

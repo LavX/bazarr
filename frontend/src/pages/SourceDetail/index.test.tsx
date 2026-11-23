@@ -10,7 +10,11 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { sourceDetailApi, sourceDetailKeys } from "./api";
-import { SourceMovieDetailView, SourceSeriesDetailView } from ".";
+import {
+  SourceLeagueDetailView,
+  SourceMovieDetailView,
+  SourceSeriesDetailView,
+} from ".";
 
 const movie = {
   id: 7,
@@ -39,24 +43,24 @@ const movie = {
   missing_subtitles: ["hu:forced"],
 };
 
-function openPage(kind: "movie" | "series") {
-  const route = kind === "movie" ? "/movies/source/:id" : "/series/source/:id";
+function openPage(kind: "movie" | "series" | "sports") {
+  const route = `/${kind === "movie" ? "movies" : kind}/source`;
   const router = createMemoryRouter(
     [
       {
-        path: route,
+        path: `${route}/:id`,
         element:
           kind === "movie" ? (
             <SourceMovieDetailView />
-          ) : (
+          ) : kind === "series" ? (
             <SourceSeriesDetailView />
+          ) : (
+            <SourceLeagueDetailView />
           ),
       },
     ],
     {
-      initialEntries: [
-        kind === "movie" ? "/movies/source/7" : "/series/source/7",
-      ],
+      initialEntries: [`${route}/7`],
     },
   );
   return rawRender(
@@ -88,6 +92,75 @@ beforeEach(() => {
     http.get("/api/system/languages", () => HttpResponse.json([])),
     http.get("/api/sources/items/7", () => HttpResponse.json(movie)),
   );
+});
+
+it("groups source events by season and uses the source item action", async () => {
+  const user = userEvent.setup();
+  const search = vi.fn();
+  const events = [
+    {
+      ...movie,
+      kind: "sports_event",
+      id: 60,
+      title: "Earlier race",
+      season: 2026,
+      episode: 2,
+      event_date: "2026-02-03",
+      part_name: "Qualifying",
+    },
+    {
+      ...movie,
+      kind: "sports_event",
+      id: 61,
+      title: "Later race",
+      season: 2026,
+      event_date: "2026-04-04",
+    },
+    { ...movie, kind: "sports_event", id: 62, title: "Friendly" },
+  ];
+  server.use(
+    http.get("/api/sources/groups/7", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("kind")).toBe("league");
+      return HttpResponse.json({
+        ...movie,
+        kind: "league",
+        title: "Folder league",
+      });
+    }),
+    http.get("/api/sources/groups/7/items", () =>
+      HttpResponse.json({ data: events, total: events.length }),
+    ),
+    http.get("/api/sources/items/60", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("kind")).toBe(
+        "sports_event",
+      );
+      return HttpResponse.json(events[0]);
+    }),
+    http.post("/api/sources/items/60/search", () => {
+      search();
+      return HttpResponse.json({ job_id: null });
+    }),
+  );
+  openPage("sports");
+  expect(await screen.findByText("Season 2026")).toBeVisible();
+  expect(screen.getByText("Unknown season")).toBeVisible();
+  expect(
+    screen
+      .getAllByRole("row")
+      .filter((row) => /race/i.test(row.textContent ?? ""))
+      .map((row) => row.textContent),
+  ).toEqual([
+    expect.stringContaining("Earlier race"),
+    expect.stringContaining("Later race"),
+  ]);
+  expect(screen.getByText("2026-02-03")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Earlier race" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await user.click(dialog.getByRole("button", { name: /^Search$/ }));
+  await waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+  expect(dialog.getByRole("button", { name: "Manual Search" })).toBeEnabled();
+  expect(dialog.getByRole("button", { name: "Upload" })).toBeEnabled();
+  expect(dialog.getByRole("button", { name: "Identity fix" })).toBeEnabled();
 });
 
 it("reads the source movie despite a colliding Arr cache and normalizes its stored subtitle rows", async () => {

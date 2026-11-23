@@ -244,12 +244,14 @@ it.each([
         requested("audio");
         return HttpResponse.json([]);
       }),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
     );
     customRender(<WantedSportsView />);
     expect(
-      await screen.findByRole("link", { name: "Connections" }),
+      await screen.findByText("No missing Sports subtitles"),
     ).toBeInTheDocument();
-    expect(requested).not.toHaveBeenCalled();
+    expect(requested).toHaveBeenCalledWith("wanted");
+    expect(requested).not.toHaveBeenCalledWith("audio");
   },
 );
 

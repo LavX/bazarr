@@ -11,6 +11,7 @@ interface Props<T extends History.Base> {
   query: UsePaginationQueryResult<T>;
   columns: ColumnDef<T>[];
   toolbar?: ReactNode;
+  getRowId?: (row: T) => string;
 }
 
 function HistoryView<T extends History.Base = History.Base>({
@@ -18,6 +19,7 @@ function HistoryView<T extends History.Base = History.Base>({
   name,
   query,
   toolbar,
+  getRowId,
 }: Props<T>) {
   useDocumentTitle(`${name} History - ${useAppTitle()}`);
   return (
@@ -27,6 +29,7 @@ function HistoryView<T extends History.Base = History.Base>({
         tableStyles={{ emptyText: `Nothing Found in ${name} History` }}
         columns={columns}
         query={query}
+        getRowId={getRowId}
       ></QueryPageTable>
     </Container>
   );

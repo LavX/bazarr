@@ -34,12 +34,14 @@ export interface SourceGroup {
 }
 
 export interface SourceItem extends Omit<SourceGroup, "kind"> {
-  kind: "movie" | "episode" | "sports";
+  kind: "movie" | "episode" | "sports_event";
   group_id: number | null;
   path: string;
   scene_name: string | null;
   season: number | null;
   episode: number | null;
+  event_date?: string | null;
+  part_name?: string | null;
   subtitles: Subtitle[];
   missing_subtitles: Language.Info[];
   arr_shadow: boolean;
@@ -99,12 +101,21 @@ export function normalizeSourceItem(item: RawSourceItem): SourceItem {
 
 export type IdentityCorrection =
   | { candidate_id: number }
-  | { title: string; year?: number; season?: number; episode?: number };
+  | {
+      title: string;
+      year?: number;
+      season?: number;
+      episode?: number;
+      round?: number;
+      event_date?: string;
+      part_name?: string | null;
+    };
 
 export const sourceDetailKeys = {
   root: ["source-detail"] as const,
-  group: (id: number) => ["source-detail", "groups", id] as const,
-  item: (id: number, kind: "movie" | "episode" = "movie") =>
+  group: (id: number, kind: SourceGroup["kind"] = "show") =>
+    ["source-detail", "groups", kind, id] as const,
+  item: (id: number, kind: SourceItem["kind"] = "movie") =>
     ["source-detail", "items", kind, id] as const,
   episodes: (id: number) => ["source-detail", "groups", id, "items"] as const,
 };
@@ -114,18 +125,27 @@ class SourceDetailApi extends BaseApi {
     super("/sources");
   }
 
-  group(id: number, signal?: AbortSignal) {
-    return this.get<SourceGroup>(`/groups/${id}`, { kind: "show" }, signal);
+  group(id: number, signal?: AbortSignal, kind: SourceGroup["kind"] = "show") {
+    return this.get<SourceGroup>(`/groups/${id}`, { kind }, signal);
   }
 
   async item(
     id: number,
     signal?: AbortSignal,
-    kind: "movie" | "episode" = "movie",
+    kind: SourceItem["kind"] = "movie",
   ) {
     return normalizeSourceItem(
       await this.get<RawSourceItem>(`/items/${id}`, { kind }, signal),
     );
+  }
+
+  async leagueEvents(id: number, signal?: AbortSignal) {
+    const result = await this.get<{ data: RawSourceItem[]; total: number }>(
+      `/groups/${id}/items`,
+      undefined,
+      signal,
+    );
+    return result.data.map(normalizeSourceItem);
   }
 
   async episodes(
@@ -146,7 +166,7 @@ class SourceDetailApi extends BaseApi {
     kind: "groups" | "items",
     id: number,
     profileId: number | null,
-    expectedKind: "show" | "movie" | "episode" = kind === "groups"
+    expectedKind: SourceGroup["kind"] | SourceItem["kind"] = kind === "groups"
       ? "show"
       : "movie",
   ) {
@@ -162,7 +182,7 @@ class SourceDetailApi extends BaseApi {
     kind: "groups" | "items",
     id: number,
     correction: IdentityCorrection,
-    expectedKind: "show" | "movie" | "episode" = kind === "groups"
+    expectedKind: SourceGroup["kind"] | SourceItem["kind"] = kind === "groups"
       ? "show"
       : "movie",
   ) {
@@ -236,6 +256,26 @@ class SourceDetailApi extends BaseApi {
       forced: subtitle.forced,
     });
   }
+
+  excludeSubtitle(
+    id: number,
+    sourceId: number,
+    path: string,
+    key: string,
+    provider: string,
+    releaseId: string,
+  ) {
+    const language = languageInfo(key);
+    return this.post(`/items/${id}/blacklist`, {
+      source_id: sourceId,
+      subtitles_path: path,
+      language: language.code2,
+      hi: language.hi,
+      forced: language.forced,
+      provider,
+      subs_id: releaseId,
+    });
+  }
 }
 
 export const sourceDetailApi = new SourceDetailApi();
@@ -254,24 +294,34 @@ export function useSourceOwnerAvailable(
   );
 }
 
-export function useSourceGroup(id: number) {
+export function useSourceGroup(id: number, kind: SourceGroup["kind"] = "show") {
   return useQuery({
-    queryKey: sourceDetailKeys.group(id),
+    queryKey: sourceDetailKeys.group(id, kind),
     queryFn: ({ signal }) =>
-      withInlineErrors(() => sourceDetailApi.group(id, signal)),
+      withInlineErrors(() => sourceDetailApi.group(id, signal, kind)),
     enabled: Number.isSafeInteger(id) && id > 0,
     placeholderData: undefined,
     retry: false,
   });
 }
 
-export function useSourceItem(id: number, kind: "movie" | "episode" = "movie") {
+export function useSourceItem(id: number, kind: SourceItem["kind"] = "movie") {
   return useQuery({
     queryKey: sourceDetailKeys.item(id, kind),
     queryFn: ({ signal }) =>
       withInlineErrors(() => sourceDetailApi.item(id, signal, kind)),
     enabled: Number.isSafeInteger(id) && id > 0,
     placeholderData: undefined,
+    retry: false,
+  });
+}
+
+export function useSourceLeagueEvents(id: number) {
+  return useQuery({
+    queryKey: [...sourceDetailKeys.group(id, "league"), "items"],
+    queryFn: ({ signal }) =>
+      withInlineErrors(() => sourceDetailApi.leagueEvents(id, signal)),
+    enabled: Number.isSafeInteger(id) && id > 0,
     retry: false,
   });
 }
@@ -296,6 +346,7 @@ export function useRefreshSourceDetails() {
       client.invalidateQueries({ queryKey: sourceDetailKeys.root }),
       client.invalidateQueries({ queryKey: [QueryKeys.Series, "library"] }),
       client.invalidateQueries({ queryKey: [QueryKeys.Movies, "library"] }),
+      client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
       client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.Badges],
       }),

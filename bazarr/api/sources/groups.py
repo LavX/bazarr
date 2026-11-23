@@ -2,8 +2,10 @@
 
 from flask import request
 from flask_restx import Namespace, Resource
+import sqlalchemy as sa
 
 from media_sources import identify, overrides, repository, service
+from media_sources.db import handle
 from media_sources.indexer import effective_profile_id
 from media_sources.service import SourceError
 
@@ -73,3 +75,24 @@ class SourceGroupSearch(Resource):
             return queued_job_response(service.queue_group_search(group_id) or None), 202
         except SourceError as error:
             return {"error": error.code, "message": str(error)}, error.status
+
+
+@api_ns_sources_groups.route("sources/groups/<int:group_id>/items")
+class SourceLeagueItems(Resource):
+    @authenticate
+    def get(self, group_id):
+        """Return the source league's events, with dated events first."""
+        from .items import _item_detail
+
+        group = repository.get_group(group_id)
+        if group is None or group.kind != 'league':
+            return {'error': 'not_found'}, 404
+        library = repository.get_library(group.library_id)
+        items = repository.Items
+        rows = handle().execute(sa.select(items).where(
+            items.c.group_id == group_id, items.c.source_id == group.source_id,
+            items.c.library_id == group.library_id, items.c.kind == 'sports_event').order_by(
+                items.c.event_date.asc().nulls_last(), items.c.season.asc().nulls_last(),
+                items.c.episode.asc().nulls_last(), items.c.part_number, items.c.id))
+        data = [_item_detail(item, group, library) for item in rows]
+        return {'data': data, 'total': len(data)}

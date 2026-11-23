@@ -603,7 +603,7 @@ type ItemSearchResult = Partial<SeriesIdType> &
     | { origin?: "arr"; source_kind?: never }
     | {
         origin: "source";
-        source_kind: "show" | "movie";
+        source_kind: "show" | "movie" | "league";
         id: number;
         arr_instance_id?: never;
         sonarrSeriesId?: never;

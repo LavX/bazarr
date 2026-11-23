@@ -4,7 +4,18 @@ import type { SubtitleSyncStatus } from "@/utilities/subtitles";
 import BaseApi from "./base";
 import client from "./client";
 
-export interface SportsLeague {
+export interface SportsSourceFields {
+  origin?: "arr" | "source";
+  source_key?: MediaSourceKey;
+  source_name?: string | null;
+  source_kind?: MediaSourceKind | null;
+  source_id?: number | null;
+  identity_state?: Wanted.SourceRow["identity_state"];
+  source_item_id?: number | null;
+  source_group_id?: number | null;
+}
+
+export interface SportsLeague extends SportsSourceFields {
   id: number;
   arr_instance_id: number;
   sportarrLeagueId: number;
@@ -27,7 +38,7 @@ export interface SportsLeague {
   missingLanguageCount: number;
 }
 
-export interface SportsEventReference {
+export interface SportsEventReference extends SportsSourceFields {
   id: number;
   arr_instance_id: number;
   league_id: number;
@@ -96,7 +107,7 @@ export interface SportsDownloadResult {
   job_id: number | null;
 }
 
-export interface SportsRecord {
+export interface SportsRecord extends SportsSourceFields {
   id: number;
   arr_instance_id: number;
   league_id: number;
@@ -159,6 +170,8 @@ export interface SportsJobStatus {
   } | null;
 }
 export interface SportsFilters {
+  includeSources?: boolean;
+  sourceKeys?: MediaSourceKey[];
   owner?: number;
   eventId?: number;
   /** Restrict to one league's events; the league toolbox History button sets it. */
@@ -190,6 +203,8 @@ class SportsApi extends BaseApi {
     return this.get<{ data: (SportsEvent | SportsRecord)[]; total: number }>(
       `/${kind}`,
       {
+        sources: filters.includeSources ? 1 : undefined,
+        "source_key[]": filters.sourceKeys,
         arr_instance_id: filters.owner,
         event_id: filters.eventId,
         league_id: filters.leagueId,
@@ -220,8 +235,41 @@ class SportsApi extends BaseApi {
       )
     ).data;
   }
-  list(owner?: number, start = 0, length = 100) {
+  async removeSourceExclusion(id?: number, sourceKey?: MediaSourceKey) {
+    if (!id && !sourceKey?.startsWith("source:"))
+      throw new Error("Select a source first");
+    return (
+      await this.delete<{ removed: boolean | number }>(
+        id ? `/blacklist/${id}` : "/blacklist",
+        undefined,
+        {
+          sources: 1,
+          origin: id ? "source" : undefined,
+          "source_key[]": sourceKey ? [sourceKey] : undefined,
+        },
+      )
+    ).data;
+  }
+
+  async sourceWanted(sourceKeys: MediaSourceKey[]) {
+    if (
+      sourceKeys.length === 0 ||
+      sourceKeys.some((key) => !key.startsWith("source:"))
+    ) {
+      throw new Error("Select at least one source");
+    }
+    return (
+      await this.postRaw<SportsJob>(
+        "/wanted",
+        {},
+        { sources: 1, "source_key[]": sourceKeys },
+      )
+    ).data;
+  }
+  list(owner?: number, start = 0, length = 100, filters: SportsFilters = {}) {
     return this.get<{ data: SportsLeague[]; total: number }>("/leagues", {
+      sources: filters.includeSources ? 1 : undefined,
+      "source_key[]": filters.sourceKeys,
       arr_instance_id: owner,
       start,
       length,

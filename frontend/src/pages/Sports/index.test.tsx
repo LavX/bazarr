@@ -23,6 +23,87 @@ describe("sports library", () => {
       ),
     );
   });
+  it("shows colliding Arr and source leagues and sends the selected source key", async () => {
+    const user = userEvent.setup();
+    let selected: string[] = [];
+    const availability = { browsable: true, searchable: true, retained: false };
+    const rows = [
+      {
+        id: 51,
+        title: "Arr race league",
+        origin: "arr",
+        arr_instance_id: 42,
+        eventCount: 1,
+        eventFileCount: 1,
+        tags: [],
+        audio_language: [],
+      },
+      {
+        id: 51,
+        title: "Local race league",
+        origin: "source",
+        source_key: "source:8",
+        source_name: "Local races",
+        eventCount: 1,
+        eventFileCount: 1,
+        tags: [],
+        audio_language: [],
+      },
+    ];
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/system/media-sources", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 8,
+              name: "Local races",
+              kind: "folder",
+              enabled: true,
+              libraries: [{ id: 9, enabled: true, content_kind: "sports" }],
+            },
+          ],
+          availability: {
+            movie: availability,
+            series: availability,
+            sports: availability,
+          },
+        }),
+      ),
+      http.get("/api/sports/leagues", ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        expect(params.get("sources")).toBe("1");
+        selected = params.getAll("source_key[]");
+        const data = selected.length
+          ? rows.filter((row) => row.origin === "source")
+          : rows;
+        return HttpResponse.json({ data, total: data.length });
+      }),
+    );
+    customRender(<Sports />);
+    expect(
+      await screen.findByRole(
+        "link",
+        { name: "Arr race league" },
+        { timeout: 8000 },
+      ),
+    ).toHaveAttribute("href", "/sports/51?instance=42");
+    expect(
+      screen.getByRole("link", { name: "Local race league" }),
+    ).toHaveAttribute("href", "/sports/source/51");
+    const source = screen.getByRole("row", { name: /Local race league/ });
+    expect(within(source).getByText("Local races")).toBeVisible();
+    expect(within(source).queryByRole("checkbox")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    const listbox = await openSelect(user, "Filter by source...");
+    await user.click(
+      within(listbox).getByRole("option", { name: "Local races" }),
+    );
+    await waitFor(() => expect(selected).toEqual(["source:8"]));
+    expect(screen.queryByRole("link", { name: "Arr race league" })).toBeNull();
+  });
   it("renders leagues in the shared table with owner, sport and event counts", async () => {
     const user = userEvent.setup();
     let assigned: unknown;

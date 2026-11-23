@@ -1,7 +1,11 @@
 import { FunctionComponent, ReactNode } from "react";
 import { useSearchParams } from "react-router";
-import { Button, Group, Select, Text, TextInput } from "@mantine/core";
-import { useSportsAvailability } from "@/apis/hooks/sports";
+import { Button, Group, Text, TextInput } from "@mantine/core";
+import {
+  useSportsActivityScope,
+  useSportsAvailability,
+} from "@/apis/hooks/sports";
+import SourceFilter from "./SourceFilter";
 
 interface Props {
   language: string;
@@ -15,6 +19,7 @@ interface Props {
   actionColor?: string;
   actionDisabled?: boolean;
   onAction?: (owner: number) => void;
+  onSourceAction?: (source: MediaSourceKey) => void;
   actionLoading?: boolean;
 }
 
@@ -33,17 +38,20 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
   actionColor,
   actionDisabled,
   onAction,
+  onSourceAction,
   actionLoading,
 }) => {
-  const { instances } = useSportsAvailability();
+  const { instances, sourceActivity } = useSportsAvailability();
+  const scope = useSportsActivityScope();
   const [params, setParams] = useSearchParams();
-  const ownerParam = params.get("instance");
-  const owner = ownerParam ? Number(ownerParam) : undefined;
+  const owner = scope.owner;
   const eventId = params.get("event_id");
   // With exactly one Sportarr there is nothing to choose, so its actions run
   // against it without making the user pick it first.
-  const selectedOwner =
-    owner === undefined
+  const source = scope.selected?.startsWith("source:") ? scope.selected : null;
+  const selectedOwner = source
+    ? undefined
+    : owner === undefined
       ? instances.length === 1
         ? instances[0].id
         : undefined
@@ -52,25 +60,12 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
   return (
     <>
       <Group align="end">
-        <Select
-          label="Instance"
-          placeholder="All instances"
-          clearable
-          value={owner ? String(owner) : null}
-          data={instances.map((instance) => ({
-            value: String(instance.id),
-            label: instance.name,
-          }))}
-          onChange={(value) => {
-            const next = new URLSearchParams(params);
-            // The event filter belongs to one instance's row, so it cannot
-            // survive a change of instance.
-            next.delete("event_id");
-            next.delete("league");
-            if (value) next.set("instance", value);
-            else next.delete("instance");
-            setParams(next);
-          }}
+        <SourceFilter
+          labels={scope.labels}
+          value={scope.selected}
+          onChange={scope.onChange}
+          includeSources={sourceActivity}
+          showSingleSource={sourceActivity}
         />
         <TextInput
           label="Language"
@@ -88,15 +83,21 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
           <Button
             color={actionColor}
             variant={actionColor ? "light" : undefined}
-            disabled={!selectedOwner || actionDisabled}
+            disabled={
+              !(selectedOwner || (source && onSourceAction)) || actionDisabled
+            }
             loading={actionLoading}
-            onClick={() => selectedOwner && onAction?.(selectedOwner)}
+            onClick={() =>
+              source
+                ? onSourceAction?.(source)
+                : selectedOwner && onAction?.(selectedOwner)
+            }
           >
             {actionLabel}
           </Button>
         )}
       </Group>
-      {actionLabel && !selectedOwner && (
+      {actionLabel && !selectedOwner && !(source && onSourceAction) && (
         <Text size="sm" c="dimmed">
           Select an instance to run an action for its library.
         </Text>
