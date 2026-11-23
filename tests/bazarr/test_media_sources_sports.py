@@ -689,6 +689,13 @@ def test_sports_item_override_controls_provider_identity(client, arr_library, tm
     assert response.get_json()['round'] == 10
     context = resolve_item(dated)
     assert (context.title, context.year) == ('Test Grand Prix Qualifying', 2027)
+    for field, value in (('event_date', '2027-05-21'), ('season', 2027), ('round', 10)):
+        cleared = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={field: None})
+        assert cleared.status_code == 200, cleared.json
+        assert cleared.json[field] is None
+        restored = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={field: value})
+        assert restored.status_code == 200, restored.json
+        assert restored.json[field] == value
     for patch in ({'event_date': '2026-02-29'}, {'round': None}, {'candidate_id': 65536}):
         assert client.patch(f'/api/sources/items/{round_id}', headers=HEADERS, json=patch).status_code == 400
 

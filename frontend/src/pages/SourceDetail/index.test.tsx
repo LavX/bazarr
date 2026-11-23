@@ -8,7 +8,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import { invalidateSourceDetails } from "@/apis/queries/sourceDetails";
 import client from "@/apis/raw/client";
 import { AllProviders } from "@/providers";
-import { act, rawRender, screen, waitFor, within } from "@/tests";
+import { act, fireEvent, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { sourceDetailApi, sourceDetailKeys } from "./api";
 import {
@@ -233,6 +233,11 @@ it.each([
       await screen.findByRole("dialog", { name: "Identity fix" }),
     );
     if (clear) await user.clear(correction.getByLabelText(clear));
+    if (empty) {
+      fireEvent.change(correction.getByLabelText("Date"), {
+        target: { value: "2026-02-03" },
+      });
+    }
     await user.click(correction.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(identify).toHaveBeenCalledWith({
@@ -245,7 +250,7 @@ it.each([
               season: clear === "Season" ? null : event.season,
               round: clear === "Round" ? null : event.episode,
             }
-          : {}),
+          : { event_date: "2026-02-03" }),
       }),
     );
   },
