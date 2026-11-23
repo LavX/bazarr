@@ -461,12 +461,22 @@ def _copy_compatibility(video, sub, parsed):
 
 
 def _source_archive_context(context, facts):
-    identity = context.get("episode_identity")
-    if not facts or facts.get("source_id") is None or not identity or context.get("manual_confirmed"):
+    if context.get("media_type") != "episode" or not facts or facts.get("source_id") is None:
         return None
     source_numbers = (facts.get("source_season"), facts.get("source_episode"))
     target = (context["season"], context["episode"])
-    if source_numbers == target == (identity["season"], identity["episode"]):
+    identity = None if context.get("manual_confirmed") else context.get("episode_identity")
+    if facts["identity_source"] == "user":
+        from media_sources.parse import parse_episode_file
+        group = facts.get("source_group_key")
+        parsed = parse_episode_file(facts["path"], group if group and os.path.isabs(group) else None)
+        filename_numbers = (parsed.season, parsed.episode)
+        if parsed.multi_episode or any(actual is not None and actual != expected
+                                       for actual, expected in zip(filename_numbers, source_numbers)):
+            # Search follows the saved correction. An archive name cannot say
+            # whether it follows that correction or the file's old numbering.
+            return {"season": None, "episode": None, "strict_numbering": True}
+    if identity and source_numbers == target == (identity["season"], identity["episode"]):
         return None
     # The provider still searches its canonical episode. A downloaded
     # archive must select the numbering on the file the reader chose.

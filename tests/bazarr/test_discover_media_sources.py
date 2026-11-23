@@ -15,6 +15,20 @@ quiet_queue = summary_fixtures.quiet_queue
 HEADERS = {"X-API-KEY": "discover-test-key"}
 
 
+def archive_provider(providers, monkeypatch, payload, selector=None):
+    from provider_hub.registry import HubProxyProvider
+    from subliminal_patch.extensions import provider_registry
+    from test_provider_hub_archive_candidates import ArchiveSearchWorker
+
+    worker = ArchiveSearchWorker(payload, selector=selector)
+    cls = provider_registry[providers.add("discover_source")]
+    monkeypatch.setattr(cls, "list_subtitles", HubProxyProvider.list_subtitles)
+    monkeypatch.setattr(cls, "_worker", lambda _: worker)
+    monkeypatch.setattr(cls, "_gated_request", lambda _, operation, body, timeout: worker.request(operation, body, timeout))
+    monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
+    return worker
+
+
 def add_source(session, kind, *, enabled=1, name=None):
     from app.database import TableMediaSourceLibraries, TableMediaSources
 
@@ -145,9 +159,7 @@ def test_remapped_episode_uses_only_the_selected_source_archive_member(
 ):
     from app.database import TableSourceGroups, TableSourceItems
     from discover import metadata
-    from provider_hub.registry import HubProxyProvider
-    from subliminal_patch.extensions import provider_registry
-    from test_provider_hub_archive_candidates import ArchiveSearchWorker, archive_payload
+    from test_provider_hub_archive_candidates import archive_payload
 
     _, session = copy_database
     owner = add_source(session, "series")
@@ -187,14 +199,8 @@ def test_remapped_episode_uses_only_the_selected_source_archive_member(
         members[f"{correct.stem}.Other.srt"] = sibling_srt
     extra = {"pinned_sibling": {"member": f"{wrong.stem}.srt"},
              "worker_sibling": {"select_member": True}}.get(archive_mode, {})
-    worker = ArchiveSearchWorker(archive_payload(members, **extra),
-                                 selector={"decision": "pin", "member": f"{wrong.stem}.srt"})
-    name = providers.add("discover_source")
-    cls = provider_registry[name]
-    monkeypatch.setattr(cls, "list_subtitles", HubProxyProvider.list_subtitles)
-    monkeypatch.setattr(cls, "_worker", lambda _: worker)
-    monkeypatch.setattr(cls, "_gated_request", lambda _, operation, payload, timeout: worker.request(operation, payload, timeout))
-    monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
+    worker = archive_provider(providers, monkeypatch, archive_payload(members, **extra),
+                              {"decision": "pin", "member": f"{wrong.stem}.srt"})
     selection = {**manual, "language": "eng", "title": "Breaking Bad", "year": 2008, "episode_identity": canonical}
     refusal = copies_fixtures.post(authenticated_client, {**selection, "copy_id": manual_source["copy_id"]})
     assert refusal.status_code == 409
@@ -216,6 +222,81 @@ def test_remapped_episode_uses_only_the_selected_source_archive_member(
         [selector_request] = worker.selections
         assert selector_request["members"] == [f"{correct.stem}.srt"]
         assert (selector_request["season"], selector_request["episode"], selector_request["absolute_episode"]) == (1, 3, None)
+
+
+@pytest.mark.parametrize("mode", ["pin", "defer", "sibling", "corrected"])
+def test_scanned_episode_archive_uses_manual_numbers_and_respects_an_identity_correction(
+    authenticated_client, source_db, providers, monkeypatch, tmp_path, mode,
+):
+    from app import database
+    from discover import metadata
+    from media_sources import indexer, scanner
+    from test_provider_hub_archive_candidates import archive_payload
+
+    monkeypatch.setattr(database, "engine", source_db.get_bind())
+    monkeypatch.setattr(indexer, "get_language_set", lambda: set())
+    show = {"id": 84, "source": "tmdb", "media_type": "show", "title": "Moon Show", "year": 2008,
+            "imdb_id": "tt0000084"}
+    monkeypatch.setattr(metadata, "search_shows", lambda *args, **kwargs: {
+        "data": {"status": "available", "items": [show]},
+    })
+    monkeypatch.setattr(metadata, "show_details", lambda _: {"data": {"status": "available", "item": show}})
+    catalog_numbers = (2, 1) if mode == "corrected" else (1, 3)
+    canonical = {"source": "tmdb", "id": 903, "show_id": 84, "season": catalog_numbers[0], "episode": catalog_numbers[1],
+                 "target_season": 2, "target_episode": 1, "identity_status": "resolved", "show_imdb_id": "tt0000084",
+                 "show_title": "Moon Show", "show_year": 2008}
+    monkeypatch.setattr(metadata, "_episode_details_with_validity", lambda *_: ({"data": {"episode": canonical}}, float("inf")))
+
+    library = tmp_path / "library"
+    path = copies_fixtures.media_file(library / "Moon Show (2008)", "Moon.Show.S01E03.mkv", b"selected episode")
+    created = authenticated_client.post("/api/system/media-sources", headers=HEADERS,
+                                       json={"name": "Local shows", "library": {"path": str(library), "content_kind": "series"}})
+    assert created.status_code == 201
+    source_id = created.json["id"]
+    assert scanner.run_scan(source_id)[0].status == "ok"
+    listed = authenticated_client.get("/api/sources/items", headers=HEADERS, query_string={"source_id": source_id})
+    [item] = listed.json["data"]
+    assert (item["season"], item["episode"], item["tmdb_id"]) == (1, 3, None)
+
+    target = {"media_type": "episode", "tmdb_id": 84, "imdb_id": "tt0000084", "season": 2, "episode": 1}
+    verified = {**target, "source_season": catalog_numbers[0], "source_episode": catalog_numbers[1], "episode_tmdb_id": 903}
+    assert copies_fixtures.copies(authenticated_client, **verified).json["items"] == []
+    if mode == "corrected":
+        corrected = authenticated_client.patch(f"/api/sources/items/{item['id']}", headers=HEADERS,
+                                                json={"season": 2, "episode": 1})
+        assert corrected.status_code == 200
+        assert (corrected.json["season"], corrected.json["episode"], corrected.json["identity_source"]) == (2, 1, "user")
+        [copy] = copies_fixtures.copies(authenticated_client, **verified).json["items"]
+    else:
+        target.update(season=1, episode=3)
+        [copy] = copies_fixtures.copies(authenticated_client, **target).json["items"]
+
+    combined = "Moon.Show.S01E03E04.srt"
+    wrong = "Moon.Show.S02E01.srt"
+    members = {wrong: copies_fixtures.SRT.replace(b"Chosen copy dialogue", b"Sibling episode dialogue")}
+    if mode != "sibling":
+        members[combined] = copies_fixtures.SRT
+    selector = {"decision": "pin", "member": combined} if mode == "pin" else {"decision": "defer"}
+    worker = archive_provider(providers, monkeypatch, archive_payload(members, select_member=mode in ("pin", "defer")), selector)
+    response = copies_fixtures.post(authenticated_client, {
+        **target, "language": "eng", "title": "Moon Show", "year": 2008, "episode_identity": canonical,
+        "manual_confirmed": mode != "corrected", "copy_id": copy["copy_id"],
+    })
+    assert response.status_code == 200
+    assert response.json["context"]["copy"]["filename"] == path.name
+    [video] = worker.searches
+    assert (video["season"], video["episode"]) == (target["season"], target["episode"])
+    [result] = response.json["results"]
+    download = download_fixtures.get(authenticated_client, result)
+    if mode in ("pin", "defer"):
+        assert download.status_code == 200
+        assert download.data == copies_fixtures.SRT
+        [request] = worker.selections
+        assert request["members"] == [combined]
+        assert (request["season"], request["episode"]) == (1, 3)
+    else:
+        assert download.status_code == 502
+        assert download.json["reason"] == "archive_no_match"
 
 
 def test_tmdb_only_catalog_episode_resolves_a_manually_confirmed_source_copy(

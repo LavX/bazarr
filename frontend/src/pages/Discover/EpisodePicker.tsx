@@ -75,10 +75,9 @@ export default function EpisodePicker({
       episodeIdentityKey(episode)
     )
       return;
-    if (currentDraft.current.manualEntry) {
-      updateDraft({ episodeIdentity: episode });
-      return;
-    }
+    // A late catalog episode belongs to the link. The manual input may name
+    // another episode and already own an in-flight search for that choice.
+    if (currentDraft.current.manualEntry) return;
     // Adoption is deliberately not gated on the episode agreeing with the show
     // item. The three conditions above already pin it to this link's own show,
     // season and number, so it is the source's current answer for the episode

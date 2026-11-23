@@ -553,8 +553,9 @@ def _seven_zip_archive(raw: bytes):
 
 
 def _numbered_episode_members(archive, season, episode, *, forced):
-    """Use the archive selector's filename identities for one named episode."""
+    """Use the archive selector's episode numbers within a single named season."""
     from guessit import guessit
+    from subliminal_patch.providers.utils import _contains_number
 
     if type(season) is not int or type(episode) is not int:
         return []
@@ -563,7 +564,7 @@ def _numbered_episode_members(archive, season, episode, *, forced):
         if not forced and os.path.splitext(name.lower())[0].endswith("forced"):
             continue
         guessed = guessit(name, options={"type": "episode"})
-        if (guessed.get("season"), guessed.get("episode")) == (season, episode):
+        if guessed.get("season") == season and _contains_number(guessed.get("episode"), episode):
             matching.append(name)
     return matching
 

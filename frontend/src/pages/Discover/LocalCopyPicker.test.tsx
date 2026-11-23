@@ -581,8 +581,17 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
   const episodePending = new Promise<void>((resolve) => {
     finishEpisode = resolve;
   });
+  let finishSearch: () => void = () => undefined;
+  const searchPending = new Promise<void>((resolve) => {
+    finishSearch = resolve;
+  });
   copyPayload = { items: [sourceCopy], truncated: false, owning_titles: 1 };
   server.use(
+    discoverSearchJob(async ({ request }) => {
+      searches.push(await request.json());
+      await searchPending;
+      return new HttpResponse(null, { status: 503 });
+    }),
     http.get("/api/discover/metadata/shows/100", () =>
       HttpResponse.json({
         data: {
@@ -631,13 +640,6 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
       name: "I confirm the manual season and episode numbers",
     }),
   );
-  finishEpisode();
-  await waitFor(() =>
-    expect(
-      screen.queryByText("Loading episode details…"),
-    ).not.toBeInTheDocument(),
-  );
-  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("5");
   await pickOption(user, "Subtitle language", "English");
   await pickOption(user, "Library copy", describeCopy(sourceCopy));
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
@@ -653,6 +655,22 @@ it("lets a TMDB-only show on its catalog page search a manually confirmed source
     copy_id: sourceCopy.copy_id,
   });
   expect(searches[0]).not.toHaveProperty("imdb_id");
+  finishEpisode();
+  await waitFor(() =>
+    expect(
+      screen.queryByText("Loading episode details…"),
+    ).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("5");
+  expect(
+    screen.getByRole("button", { name: "Finding subtitles" }),
+  ).toBeVisible();
+  finishSearch();
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: "Finding subtitles" }),
+    ).not.toBeInTheDocument(),
+  );
 });
 
 it("uses both episode numbering schemes to ask for copies of a verified catalog episode", async () => {
