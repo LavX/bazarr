@@ -225,7 +225,7 @@ def _fields_of(engine, release_id):
 @pytest.mark.parametrize("startup", ["alembic", "first-write", "release-rows"])
 @pytest.mark.parametrize("evidence", [
     "v270", "cached-entry", "republished", "different-active", "replaced", "replaced-cache",
-    "replaced-cache-direct",
+    "replaced-cache-direct", "replaced-cache-direct-agrees",
 ])
 def test_community_release_slots_require_matching_legacy_catalog_evidence(
         hub_store, hub_engine, monkeypatch, startup, evidence):
@@ -255,13 +255,14 @@ def test_community_release_slots_require_matching_legacy_catalog_evidence(
                                 "manifest": {**manifest, "source": {**manifest["source"],
                                              "catalog_url": other if evidence == "republished" else url}}}
         else:
-            matches = (evidence in {"v270", "replaced-cache-direct"}
+            matches = (evidence == "v270" or evidence.startswith("replaced-cache-direct")
                        or (evidence == "different-active" and index == 1))
             manifest["source"]["catalog_url"] = url if matches else other
         if evidence.startswith("replaced-cache"):
+            digest = manifest["bundle_sha256"] if evidence.endswith("-agrees") else "d" * 64
             entries[version] = {"source": source_id, "provider_id": plugin_id, "version": version,
                                 "resolved_commit": manifest["source"]["commit"],
-                                "manifest": {**manifest, "bundle_sha256": "d" * 64}}
+                                "manifest": {**manifest, "bundle_sha256": digest}}
         bundle = state.provider_hub_dir() / "bundles" / plugin_id / version / manifest["source"]["commit"]
         bundle.mkdir(parents=True)
         (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
