@@ -186,7 +186,7 @@ class Series(Resource):
         if owner_filter.keys:
             stmt = stmt.where(owner_filter.arr(TableShows.arr_instance_id))
         if mixed:
-            rows, count = library_page(database, stmt, show_rows(owner_filter), TableShows.sortTitle,
+            rows, count = library_page(database, stmt, show_rows(owner_filter, database), TableShows.sortTitle,
                                        start=start, length=length, needs_attention=needs_attention)
         else:
             count_query = select(func.count()).select_from(TableShows)

@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from flask_restx import fields
 
 from api.utils import postprocess
-from . import repository
+from . import identity, repository
 from .api_rows import postprocess_source, source_row_fields
 from .union import union_page
 
@@ -41,13 +41,15 @@ def movie_rows(owner_filter):
     )
 
 
-def show_rows(owner_filter):
+def show_rows(owner_filter, session):
     groups, libraries, sources, items = repository.Groups, repository.Libraries, repository.Sources, repository.Items
     group, library, source, item = groups.c, libraries.c, sources.c, items.c
     profile = sa.func.coalesce(group.profile_id, library.profile_id)
     missing = sa.and_(item.missing_subtitles.is_not(None), item.missing_subtitles != '[]',
                       item.arr_shadow == 0, item.server_missing == 0, item.monitored == 1,
-                      item.identity_state.in_(('identified', 'parsed')), sa.func.coalesce(item.profile_id, profile).is_not(None))
+                      item.identity_state.in_(('identified', 'parsed')),
+                      sa.func.coalesce(item.profile_id, profile).is_not(None),
+                      ~identity.arr_claims_stored_path(item.path, session))
     episodes = sa.and_(item.group_id == group.id, item.kind == 'episode',
                        item.source_id == group.source_id, item.library_id == group.library_id)
     count = sa.select(sa.func.count()).where(episodes).correlate(groups).scalar_subquery()

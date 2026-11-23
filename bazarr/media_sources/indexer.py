@@ -344,7 +344,7 @@ def effective_profile_id(item, group=None, library=None):
 
 
 def _missing(item, listing, audio_language, target):
-    group = repository.get_group(item.group_id, target) if item.group_id is not None else None
+    group = repository.get_item_group(item, target)
     library = repository.get_library(item.library_id, target)
     profile_id = effective_profile_id(item, group, library)
     if profile_id is None:
@@ -553,7 +553,7 @@ def recalculate_missing_subtitles(*, library_id=None, group_id=None, item_id=Non
     if library_id is not None:
         scope.append(items.c.library_id == library_id)
     if group_id is not None:
-        scope.append(items.c.group_id == group_id)
+        scope.append(repository.group_item_scope(group_id))
     if item_id is not None:
         scope.append(items.c.id == item_id)
     item_ids = handle().execute(sa.select(items.c.id).where(*scope, items.c.subtitles.is_not(None))).scalars().all()
@@ -561,11 +561,10 @@ def recalculate_missing_subtitles(*, library_id=None, group_id=None, item_id=Non
         if cancel is not None:
             cancel()
         with source_transaction() as connection:
-            item = repository.get_item(current_id, connection, for_update=True)
+            item = repository.get_item(current_id, connection, group_id=group_id, for_update=True)
             if item is None or item.subtitles is None:
                 continue
-            if ((library_id is not None and library_id != item.library_id)
-                    or (group_id is not None and group_id != item.group_id)):
+            if library_id is not None and library_id != item.library_id:
                 continue
             external = [entry for entry in ast.literal_eval(item.subtitles) if entry[1]]
             data = read_metadata(item.ffprobe_cache)
@@ -577,11 +576,12 @@ def recalculate_missing_subtitles(*, library_id=None, group_id=None, item_id=Non
             missing = str(_missing(item, listing, item.audio_language, connection))
             if (subtitles, missing) != (item.subtitles, item.missing_subtitles):
                 repository.write_item_index(current_id, subtitles, missing, connection, indexed=False)
-    if item_id is not None or group_id is not None:
-        from app.event_handler import event_stream, socketio
+    from app.event_handler import event_stream, socketio
 
-        if socketio.server is not None:
-            if item_id is not None:
-                event_stream(type='source-item', payload=item_id)
-            if group_id is not None:
-                event_stream(type='source-group', payload=group_id)
+    if socketio.server is not None:
+        # A broad pass can consume pending item and group refreshes in the job queue.
+        broad = item_id is None and group_id is None
+        if broad or item_id is not None:
+            event_stream(type='source-item', payload=item_id)
+        if broad or group_id is not None:
+            event_stream(type='source-group', payload=group_id)
