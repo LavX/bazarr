@@ -460,21 +460,16 @@ def _write_source_download(video_path, destination, content, *, source, language
             paths = (old_path, destination) if remove_previous else (destination,)
             outputs = tuple(output for path in paths
                             for output in plan_sync_output_cleanup(video_path, path, ownership_index))
-            return paths, outputs
+            proof = ownership_index.prepare_registered_ownership(video_path, (*paths, *(path for path, _ in outputs)))
+            return paths, outputs, proof
         if wanted_stamp is None and recheck_missing:
             return prepare_source_sidecars(source, ownership_index, written_paths)
         return None
 
-    def refresh(prepared):
-        paths, outputs = prepared
-        if not ownership_index.registered_ownership_is_current(video_path, (*paths, *(path for path, _ in outputs))):
-            raise SubtitleDestinationChanged('Registered subtitle ownership could not be verified before publication')
-
     @contextmanager
     def publication(files):
-        guard_options = {'cleanup_outputs': True} if upgrade is None else {'refresh': refresh}
-        with ownership_index.publication(source, prepare, destination=registry_destination, **guard_options) as (
-                current, connection, prepared):
+        with ownership_index.publication(source, prepare, destination=registry_destination,
+                                         cleanup_outputs=upgrade is None) as (current, connection, prepared):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
             if video_version is not None and subtitle_source_version(video_path) != video_version:
@@ -487,10 +482,12 @@ def _write_source_download(video_path, destination, content, *, source, language
                     raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
                 if destination_setting is not None and destination_setting != _source_subtitle_destination_setting():
                     raise SubtitleDestinationChanged('The subtitle destination setting changed before publication')
-                paths, outputs = prepared
+                paths, outputs, proof = prepared
                 output_paths = tuple(path for path, _ in outputs)
                 if not local_subtitle_ownership_is_current(video_path, (*paths, *output_paths), ownership_index):
                     raise SubtitleDestinationChanged('Subtitle ownership in the source directory changed during search')
+                if not ownership_index.registered_ownership_is_current(proof):
+                    raise SubtitleDestinationChanged('Registered subtitle ownership changed before publication')
                 files.enter_context(subtitle_mutation(video_path, old_path, *output_paths, invalidate_outputs=False))
                 files.enter_context(_preserve_source_subtitle(old_path, upgrade.subtitle_version, retire=remove_previous))
                 for output, version in outputs:

@@ -9,8 +9,10 @@ import ast
 import logging
 import os
 import sqlite3
+from collections import defaultdict
 from contextlib import contextmanager
-from functools import partial
+from dataclasses import dataclass
+from functools import cache, partial
 from itertools import chain
 from time import sleep
 
@@ -107,6 +109,16 @@ class SourcePublicationOwnersChanged(SubtitleDestinationChanged):
     """The prepared shared ownership could not be pinned for publication."""
 
 
+@dataclass(frozen=True)
+class _RegisteredSubtitleClaims:
+    video: str
+    output_folders: dict[str, str]
+    candidates: tuple[set[tuple[str, str]], ...]
+    relevant_paths: set[str]
+    other_paths: dict[str, set[str]]
+    parent_versions: dict[str, tuple | None]
+
+
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     """Source writes in shared subtitle folders must account for all media stored there."""
 
@@ -165,43 +177,73 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                 pass
             return os.path.normcase(resolved)
 
-    def registered_ownership_is_current(self, video_path, subtitle_paths):
-        """Refresh physical claims on the files the upgrade is about to change."""
+    @staticmethod
+    def _owner_parent_version(path):
+        try:
+            info = os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+
+    def prepare_registered_ownership(self, video_path, subtitle_paths):
+        """Prepare the claim checks before locking the shared registry."""
         if self._prepared_owners is None:
-            return True
+            return None
+
         source_paths, registry_rows = self._prepared_owners
-        destination, mappings = self._publication_settings
-        resolved = {}
-
-        def resolve(path):
-            if path not in resolved:
-                resolved[path] = self._registered_owner_path(path)
-            return resolved[path]
-
+        _, mappings = self._publication_settings
+        resolve = cache(self._registered_owner_path)
         try:
             video = resolve(os.fspath(video_path))
-            candidates = []
-            for path in subtitle_paths:
-                directory = resolve(os.path.dirname(path))
-                candidates.append({(directory, stem) for stem in self.conflicting_stems(video, path)})
-            keys = set().union(*candidates)
+            output_folders = {parent: resolve(parent) for parent in {os.path.dirname(path) for path in subtitle_paths}}
+            candidates = tuple({(output_folders[os.path.dirname(path)], stem)
+                                for stem in self.conflicting_stems(video, path)} for path in subtitle_paths)
+            stems = {stem for candidate in candidates for _, stem in candidate}
+            relevant_paths, parent_versions = set(), {}
+            other_paths = defaultdict(set)
+            for path in chain(source_paths, self._mapped_registry_paths(registry_rows, mappings)):
+                parent = os.path.dirname(path) or os.curdir
+                if parent not in parent_versions:
+                    parent_versions[parent] = self._owner_parent_version(parent)
+                canonical = resolve(path)
+                physical_entry = os.path.normcase(os.path.join(resolve(parent), os.path.basename(path)))
+                if (canonical != physical_entry or _normalized_media_stem(path) in stems
+                        or _normalized_media_stem(canonical) in stems):
+                    relevant_paths.add(path)
+                else:
+                    other_paths[parent].add(path)
+            return _RegisteredSubtitleClaims(video, output_folders, candidates, relevant_paths,
+                                             dict(other_paths), parent_versions)
+        except (OSError, ValueError) as error:
+            raise SourcePublicationOwnersChanged('Registered subtitle ownership could not be prepared') from error
+
+    def registered_ownership_is_current(self, proof):
+        """Recheck relevant claims after the registry is locked, before touching files."""
+        if proof is None:
+            return True
+
+        destination, _ = self._publication_settings
+        resolve = cache(self._registered_owner_path)
+        try:
+            if any(resolve(folder) != version for folder, version in proof.output_folders.items()):
+                return False
+            relevant = proof.relevant_paths.copy()
+            # A previously unrelated regular file can become an alias for a
+            # candidate stem. Its replacement changes the containing directory.
+            for parent, paths in proof.other_paths.items():
+                if self._owner_parent_version(parent) != proof.parent_versions[parent]:
+                    relevant.update(paths)
+            keys = set().union(*proof.candidates)
             stems = {stem for _, stem in keys}
             owned = set()
-            paths = chain(source_paths, self._mapped_registry_paths(registry_rows, mappings))
-            for path in paths:
-                # A regular registered path can become an alias to any stem.
+            for path in relevant:
                 canonical = resolve(path)
-                for name in {path, canonical}:
-                    stem = _normalized_media_stem(name)
-                    if stem not in stems:
-                        continue
-                    for folder in self._owner_folders(name, destination):
-                        key = resolve(folder), stem
-                        if key in keys:
-                            if canonical != video:
-                                return False
-                            owned.add(key)
-            return all(owned & candidate for candidate in candidates)
+                for key in self._owner_claim_keys(path, canonical, destination, stems=stems, resolve=resolve):
+                    if key in keys:
+                        if canonical != proof.video:
+                            return False
+                        owned.add(key)
+            return all(owned & candidate for candidate in proof.candidates)
         except (OSError, ValueError):
             return False
 
@@ -223,7 +265,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         return directory != media_directory
 
     @contextmanager
-    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False, refresh=None):
+    def publication(self, source, prepare=None, *, destination=None, cleanup_outputs=False):
         """Keep slow ownership and subtitle discovery outside the writer transaction."""
         for _ in range(2):
             self._loaded = False
@@ -241,10 +283,6 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             for delay in (0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.40):
                 if delay:
                     sleep(delay)
-                # Refresh filesystem claims before taking registry writer locks.
-                # The transaction below verifies that the same rows still apply.
-                if refresh is not None:
-                    refresh(prepared)
                 publishing = False
                 try:
                     with self._settings_guard(), source_item_publication(source, shared=shared) as (current, connection):

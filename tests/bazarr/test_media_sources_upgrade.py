@@ -616,9 +616,9 @@ def test_source_upgrade_rechecks_ownership_and_versions_at_publication(world, mo
 
 @pytest.mark.parametrize('registry', ['source', 'mapped Arr'])
 @pytest.mark.parametrize('change', ['regular video becomes alias', 'relative subtitle folder retarget'])
-@pytest.mark.parametrize('competing', [True, False], ids=['competing', 'unrelated'])
-def test_source_upgrade_rechecks_registered_filesystem_claims_after_preparation(
-        world, monkeypatch, registry, change, competing):
+@pytest.mark.parametrize('outcome', ['competing', 'unrelated', 'rollback'])
+def test_source_upgrade_rechecks_registered_filesystem_claims_after_writer_admission(
+        world, monkeypatch, registry, change, outcome):
     from app.config import settings
     from app.database import TableArrInstances, TableMovies
     from media_sources import indexer, repository
@@ -628,6 +628,7 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_preparation(
     context = pipeline._movie(world, 'Film.mkv')
     media = Path(context.path)
     relative = change == 'relative subtitle folder retarget'
+    competing = outcome == 'competing'
     if relative:
         folder = media.parent / 'Subs'
         folder.mkdir()
@@ -663,30 +664,69 @@ def test_source_upgrade_rechecks_registered_filesystem_claims_after_preparation(
         stored_path = f'/movies/{registered.name}'
         world.db.execute(sa.insert(TableMovies).values(
             id=73, arr_instance_id=42, radarrId=9000, title='Other', path=stored_path, tmdbId='73'))
+    stable_source, stable_library, stable_root = add_source(
+        world.db, world.tmp_path, name='Stable', folder='Stable')
+    unchanged = video(stable_root / 'Unchanged.mkv')
+    add_item(world.db, stable_source, stable_library, unchanged)
     registered_realpath = registered.resolve()
     indexer.index_item(context.item_id)
     first = _history(world.db, world.source_id, context.item_id, media, original)
     monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
     monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
     pipeline._download(monkeypatch)
-    reached = []
+    reached, rollbacks, admitted_resolutions = [], [], []
+    inside_writer = False
+    publish = indexer.source_item_publication
+    resolve = indexer.SourcePublicationOwnerIndex._registered_owner_path
 
-    def change_after_prepare(source):
-        reached.append(source.item_id)
-        alias.unlink()
-        alias.symlink_to(target, target_is_directory=relative)
+    @contextmanager
+    def change_after_admission(source, **kwargs):
+        nonlocal inside_writer
+        with publish(source, **kwargs) as guarded:
+            current, connection = guarded
+            assert current is not None and connection.in_transaction() and kwargs['shared']
+            reached.append(source.item_id)
+            alias.unlink()
+            alias.symlink_to(target, target_is_directory=relative)
+            inside_writer = True
+            try:
+                yield guarded
+            finally:
+                inside_writer = False
 
-    _change_after_ownership_preparation(monkeypatch, change_after_prepare)
-    upgrade.upgrade_source_subtitles(job_id=10)
+    def track_resolution(path):
+        if inside_writer:
+            admitted_resolutions.append(path)
+        return resolve(path)
+
+    def discard_at_commit(_connection):
+        if not rollbacks and original.read_bytes() == pipeline.CONTENT:
+            assert not generated.exists()
+            rollbacks.append(True)
+            raise sa.exc.OperationalError('COMMIT', None, OSError('Lost the connection during commit'))
+
+    monkeypatch.setattr(indexer, 'source_item_publication', change_after_admission)
+    monkeypatch.setattr(indexer.SourcePublicationOwnerIndex, '_registered_owner_path', staticmethod(track_resolution))
+    engine = world.db.get_bind()
+    if outcome == 'rollback':
+        sa.event.listen(engine, 'commit', discard_at_commit)
+    try:
+        upgrade.upgrade_source_subtitles(job_id=10)
+    finally:
+        if outcome == 'rollback':
+            sa.event.remove(engine, 'commit', discard_at_commit)
 
     assert reached == [context.item_id]
+    assert str(registered) in admitted_resolutions
+    assert str(unchanged) not in admitted_resolutions
+    assert rollbacks == ([True] if outcome == 'rollback' else [])
     if relative:
         assert registered.resolve() == registered_realpath
     if registry == 'source':
         assert repository.get_item(registered_id).path == str(registered)
     else:
         assert world.db.scalar(sa.select(TableMovies.path).where(TableMovies.id == 73)) == stored_path
-    if competing:
+    if outcome != 'unrelated':
         assert record_rows(world.db) == [(first, 1, None)]
         assert original.read_bytes() == b'Old subtitle'
         assert generated.read_bytes() == b'Old generated subtitle'

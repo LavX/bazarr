@@ -458,11 +458,14 @@ class SyncOutputOwnerIndex:
             owners.setdefault(key, set()).add(canonical)
 
     @staticmethod
-    def _owner_claim_keys(path, canonical, destination):
+    def _owner_claim_keys(path, canonical, destination, *, stems=None, resolve=None):
         from utilities.helper import get_target_folder
 
         # A symlink's own name and the canonical video can each claim its subtitles.
         for name in {os.path.abspath(path), canonical}:
+            stem = _normalized_media_stem(name)
+            if stems is not None and stem not in stems:
+                continue
             if destination is None:
                 folders = {os.path.dirname(name)}
                 custom_folder = get_target_folder(name, create=False)
@@ -470,9 +473,9 @@ class SyncOutputOwnerIndex:
                     folders.add(custom_folder)
             else:
                 folders = SyncOutputOwnerIndex._owner_folders(name, destination)
-            stem = _normalized_media_stem(name)
             for folder in folders:
-                yield os.path.normcase(os.path.realpath(folder)), stem
+                physical = resolve(folder) if resolve is not None else os.path.normcase(os.path.realpath(folder))
+                yield physical, stem
 
     @staticmethod
     def _owner_folders(path, destination):
