@@ -354,9 +354,11 @@ describe.each([
         ],
         missing_subtitles: [],
         arr_shadow: false,
+        server_missing: false,
       };
       const tools = vi.fn();
       const episodes = vi.fn();
+      const readItem = vi.fn();
       server.use(
         http.get(`/api/sources/groups/${id}`, () =>
           HttpResponse.json({
@@ -367,10 +369,14 @@ describe.each([
           }),
         ),
         http.get("/api/sources/items", ({ request }) => {
-          episodes(new URL(request.url).searchParams.get("group_id"));
+          const params = new URL(request.url).searchParams;
+          episodes(params.get("group_id"), params.get("kind"));
           return HttpResponse.json({ data: [item], total: 1 });
         }),
-        http.get(`/api/sources/items/${itemId}`, () => HttpResponse.json(item)),
+        http.get(`/api/sources/items/${itemId}`, ({ request }) => {
+          readItem(new URL(request.url).searchParams.get("kind"));
+          return HttpResponse.json(item);
+        }),
         http.patch("/api/subtitles", async ({ request }) => {
           const form = await request.formData();
           tools(
@@ -381,29 +387,59 @@ describe.each([
         }),
       );
       renderLibrary(`/${kind}`);
+      // The Arr instance response can replace the row checkboxes during load.
+      await waitFor(() => {
+        expect(
+          within(screen.getByRole("row", { name: /Arr title/ })).getByText(
+            "Main",
+          ),
+        ).toBeVisible();
+        expect(
+          screen.getByRole("checkbox", { name: "Select Archive title" }),
+        ).toBeEnabled();
+        expect(
+          screen.getByRole("checkbox", { name: "Select Arr title" }),
+        ).toBeEnabled();
+      });
       await user.click(
-        await screen.findByRole("checkbox", { name: "Select Archive title" }),
+        screen.getByRole("checkbox", { name: "Select Archive title" }),
       );
       await user.click(
         screen.getByRole("checkbox", { name: "Select Arr title" }),
       );
+      expect(
+        screen.getByRole("checkbox", { name: "Select Archive title" }),
+      ).toBeChecked();
+      expect(
+        screen.getByRole("checkbox", { name: "Select Arr title" }),
+      ).toBeChecked();
       await user.click(
         screen.getByRole("button", { name: "Source Subtitle Tools" }),
       );
       const dialog = await screen.findByRole("dialog", {
         name: "Subtitle Tools",
       });
-      await user.click(
-        await within(dialog).findByRole("checkbox", {
-          name: /archive\.en\.srt/,
-        }),
-      );
-      await user.click(
-        within(dialog).getByRole("button", { name: "Select Action" }),
-      );
-      await user.click(
-        await screen.findByRole("menuitem", { name: "Common Fixes" }),
-      );
+      await within(dialog).findByText("Archive video");
+      const english = within(dialog).getByRole("checkbox", {
+        name: /archive\.en\.srt/,
+      });
+      const selectAction = within(dialog).getByRole("button", {
+        name: "Select Action",
+      });
+      expect(selectAction).toBeDisabled();
+      await user.click(english);
+      expect(english).toBeChecked();
+      expect(
+        within(dialog).getByRole("checkbox", { name: /archive\.de\.srt/ }),
+      ).not.toBeChecked();
+      await user.click(selectAction);
+      const commonFixes = await screen.findByRole("menuitem", {
+        name: "Common Fixes",
+      });
+      expect(commonFixes).toBeEnabled();
+      expect(tools).not.toHaveBeenCalled();
+      readItem.mockClear();
+      await user.click(commonFixes);
       await waitFor(() => {
         expect(tools).toHaveBeenCalledExactlyOnceWith("common", {
           type: "source",
@@ -415,7 +451,10 @@ describe.each([
         });
       });
       expect(batchArr).not.toHaveBeenCalled();
-      if (kind === "series") expect(episodes).toHaveBeenCalledWith(String(id));
+      expect(readItem).toHaveBeenCalledWith(itemKind);
+      expect(readItem).toHaveBeenCalledBefore(tools);
+      if (kind === "series")
+        expect(episodes).toHaveBeenCalledWith(String(id), "episode");
       else expect(episodes).not.toHaveBeenCalled();
     });
 

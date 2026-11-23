@@ -434,9 +434,12 @@ def development_upgrade(source_db):
     import flask_migrate
     from alembic.migration import MigrationContext
     from app.database import metadata as models, migrations_directory
-    from test_media_sources_schema import PREVIOUS, REMOVAL_KEYS, REVISION, _migration, _run
+    from test_media_sources_schema import PREVIOUS, REVISION, _heads, _migration, _run
 
     engine = source_db.get_bind()
+    # Legacy revision modules require an active Alembic context when imported.
+    # Read the revision graph without importing them.
+    head, = _heads()[1]
     # Recreate the sources schema at the actual released development revision
     # through the same Alembic environment that startup calls.
     _run(engine, _migration(REVISION).downgrade)
@@ -453,7 +456,7 @@ def development_upgrade(source_db):
         with migration_app.app_context():
             flask_migrate.upgrade(directory=migrations_directory)
         with engine.connect() as connection:
-            assert MigrationContext.configure(connection).get_current_revision() == REMOVAL_KEYS
+            assert MigrationContext.configure(connection).get_current_revision() == head
 
     return upgrade
 
