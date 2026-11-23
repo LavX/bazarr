@@ -224,7 +224,7 @@ def _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_inst
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
                              job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None,
-                             expected_destination_versions=(), source=None):
+                             expected_destination_versions=(), source=None, source_video_version=None):
     """Translate a subtitle file, as a queued job.
 
     ``embedded_source`` names an embedded track to translate instead of a file:
@@ -238,6 +238,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     destination that moved since, so a subtitle that landed while the job
     waited is not replaced, and the job reports that as a skip. A manual
     translation passes nothing and may replace its destination.
+
+    Source jobs also carry the video version from enqueue through publication.
 
     Called without ``job_id`` it only queues, for every media type, and returns
     the id of the job to follow: the one it queued, or the identical one already
@@ -253,6 +255,11 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     if not job_id:
         with _SOURCE_ENQUEUE_LOCK if source is not None else nullcontext():
             try:
+                if source is None:
+                    # The queue binds frame locals. Preserve the existing payload for native deduplication.
+                    del source_video_version
+                elif source_video_version is None:
+                    source_video_version = source_translation_video_version(video_path)
                 # With the v2 runtime on, a request for a source and target that already has a job joins it.
                 # Reusing ``job_id`` keeps the frame the queue records to the function's own parameters.
                 job_id = _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source,
@@ -331,7 +338,15 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
         if source is not None:
-            video_version = source_translation_video_version(video_path)
+            if source_video_version is None:
+                # An inline translation can bind the current file. Older queue entries cannot.
+                if expected_destination_versions or any(
+                        job['module'] == __name__ and job['func'] == 'translate_subtitles_file'
+                        for job in jobs_queue.list_jobs_from_queue(job_id=job_id, status='running')):
+                    raise SourceTranslationChanged('The queued translation has no source media version')
+                source_video_version = source_translation_video_version(video_path)
+            elif source_video_version != source_translation_video_version(video_path):
+                raise SourceTranslationChanged('The source media file changed after the translation was queued')
             destination = translated_destination_path(video_path, to_lang, forced, hi)
             source = validate_source_translation(source, video_path, source_srt_file, destination, from_lang,
                                                  to_lang, forced, hi, expected_destination_versions)
@@ -391,7 +406,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             arr_instance_id=arr_instance_id,
             expected_destination_versions=expected_destination_versions,
             **({'sports_operation': sports_operation, 'cancel': cancel} if sports_operation else {}),
-            **({'source': source, 'source_video_version': video_version} if source is not None else {}),
+            **({'source': source, 'source_video_version': source_video_version} if source is not None else {}),
         )
         if runtime_on:
             # The selected engine of the runtime, with its failover, fallback and checkpoints, replaces the

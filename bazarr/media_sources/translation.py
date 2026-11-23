@@ -11,7 +11,8 @@ from app.config import settings
 from app.database import get_audio_profile_languages, get_profile_cutoff, get_profiles_list
 from subtitles.indexer.entries import entry_codec
 from subtitles.language_profiles import build_translate_from_map
-from subtitles.tools.subsync_engines import capture_subtitle_versions, sync_output_owner_is_unique
+from subtitles.tools.subsync_engines import (capture_subtitle_versions, subtitle_source_version,
+                                            sync_output_owner_is_unique)
 from subtitles.wanted.utils import SOURCE_HISTORY_ACTIONS, source_history_for_wait, source_wait_elapsed
 
 from . import repository
@@ -152,6 +153,9 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
     source = live_source(source)
     if source is None or not source.profile_id:
         return set()
+    source_video_version = subtitle_source_version(source.path)
+    if source_video_version is None:
+        return set()
     item = _active_item(source)
     if item is None or not translation_available().available:
         return set()
@@ -194,7 +198,7 @@ def queue_missing_translations(source, *, downloaded_path=None, downloaded_langu
             video_path=source.path, source_srt_file=subtitle_path, from_lang=from_lang, to_lang=to_lang,
             forced=forced, hi=hi, media_type='episode' if source.kind == 'episode' else 'movies',
             sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, metadata=None,
-            source=source, expected_destination_versions=versions)
+            source=source, expected_destination_versions=versions, source_video_version=source_video_version)
         if job_id:
             covered.add(target)
     return covered
