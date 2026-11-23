@@ -14,6 +14,7 @@ import {
 import { QueryKeys } from "@/apis/queries/keys";
 import {
   invalidateSourceDetails,
+  invalidateSourceLibraryViews,
   sourceDetailKeys,
 } from "@/apis/queries/sourceDetails";
 import BaseApi from "@/apis/raw/base";
@@ -382,24 +383,11 @@ export function useRefreshSourceDetails() {
   const client = useQueryClient();
   return async () => {
     await Promise.all([
-      invalidateSourceDetails(client),
-      client.invalidateQueries({ queryKey: [QueryKeys.Series, "library"] }),
-      client.invalidateQueries({ queryKey: [QueryKeys.Movies, "library"] }),
+      invalidateSourceDetails(client, "sports"),
+      invalidateSourceLibraryViews(client),
       client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
       client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.Badges],
-      }),
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, QueryKeys.Wanted],
-      }),
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, QueryKeys.Wanted],
-      }),
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
-      }),
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, QueryKeys.History],
       }),
     ]);
   };

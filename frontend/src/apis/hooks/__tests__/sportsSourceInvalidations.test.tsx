@@ -747,7 +747,7 @@ it.each(["scan", "event-modal scan", "roots"] as const)(
     expect(client.getQueryState(sibling)?.isInvalidated).toBe(true);
     for (const key of untouched)
       expect(client.getQueryState(key)?.isInvalidated).toBe(
-        key[0] === "source-detail" && key[2] === "league",
+        key[0] === sourceDetailKeys.root[0] || key[0] === QueryKeys.Movies,
       );
   },
 );
@@ -1167,3 +1167,76 @@ it.each([
     unmount();
   },
 );
+
+it("refreshes displaced movie and episode owners after a Sports event scan", async () => {
+  const { client, wrapper } = setup();
+  const jobs = [QueryKeys.System, QueryKeys.Jobs];
+  client.setQueryData(jobs, [{ job_id: 91, status: "pending" }]);
+  const formerViews = [
+    [QueryKeys.Movies, "library", { includeSources: true }],
+    [QueryKeys.Series, "library", { includeSources: true }],
+    [QueryKeys.Movies, QueryKeys.Wanted, { includeSources: true }],
+    [QueryKeys.Series, QueryKeys.Wanted, { includeSources: true }],
+    [QueryKeys.Movies, QueryKeys.History, false],
+    [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History, false],
+    sourceDetailKeys.group(27, "show"),
+  ];
+  formerViews.forEach((key) => client.setQueryData(key, { data: [{ id: 1 }] }));
+  const nativeSportsHistory = [
+    QueryKeys.Sports,
+    "history",
+    explicitNativeScope,
+  ];
+  client.setQueryData(nativeSportsHistory, { data: [{ id: 33 }] });
+  let displaced = false;
+  server.use(
+    http.get("/api/sources/items/:id", ({ request, params }) => {
+      const kind = new URL(request.url).searchParams.get("kind");
+      return HttpResponse.json({
+        id: Number(params.id),
+        source_id: kind === "movie" ? 11 : 12,
+        library_id: kind === "movie" ? 21 : 22,
+        kind,
+        server_missing: displaced,
+      });
+    }),
+    http.post("/api/system/media-sources/8/libraries/9/scan", () =>
+      HttpResponse.json({ job_id: 91 }, { status: 202 }),
+    ),
+  );
+  const { result, unmount } = renderHook(
+    () => ({
+      movie: useSourceItem(201, "movie"),
+      episode: useSourceItem(202, "episode"),
+      scan: useSourceScan(),
+    }),
+    { wrapper },
+  );
+  await waitFor(() => {
+    expect(result.current.movie.data?.server_missing).toBe(false);
+    expect(result.current.episode.data?.server_missing).toBe(false);
+  });
+  await act(async () => {
+    await result.current.scan.mutateAsync({
+      source_id: 8,
+      library_id: 9,
+      kind: "sports_event",
+    });
+  });
+  expect(result.current.movie.data?.server_missing).toBe(false);
+  expect(result.current.episode.data?.server_missing).toBe(false);
+  displaced = true;
+  await act(async () => {
+    client.setQueryData(jobs, [{ job_id: 91, status: "completed" }]);
+  });
+  await waitFor(() => {
+    expect(result.current.movie.data?.server_missing).toBe(true);
+    expect(result.current.episode.data?.server_missing).toBe(true);
+  });
+  formerViews.forEach((key) =>
+    expect(client.getQueryState(key)?.isInvalidated).toBe(true),
+  );
+  expect(client.getQueryState(nativeSportsHistory)?.isInvalidated).toBe(false);
+  expect(client.getQueryState(nativeBadgesKey)?.isInvalidated).toBe(false);
+  unmount();
+});

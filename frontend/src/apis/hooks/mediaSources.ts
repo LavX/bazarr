@@ -9,6 +9,7 @@ import {
 import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import {
+  invalidateSourceLibraryViews,
   invalidateSportsSource,
   type SportsSourceScope,
 } from "@/apis/queries/sourceDetails";
@@ -181,11 +182,14 @@ export function refreshAfterSourceScan(
   client: QueryClient,
   jobId: number | null,
 ) {
-  // The scan can take over a file from another source. Its job status does
-  // not report the previous owner, so refresh all standalone Sports owners.
-  return refreshWhenJobFinishes(client, jobId, () =>
-    refreshMediaSources(client, {}),
-  );
+  // The job does not report a former owner when a scan takes over a file.
+  // A handover can affect any standalone library, including other media kinds.
+  return refreshWhenJobFinishes(client, jobId, async () => {
+    await Promise.all([
+      refreshMediaSources(client, {}),
+      invalidateSourceLibraryViews(client),
+    ]);
+  });
 }
 
 function sportsRemovalScope(

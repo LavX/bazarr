@@ -39,13 +39,14 @@ function isSportsDetail(key: QueryKey) {
 
 export async function invalidateSourceDetails(
   client: QueryClient,
-  scope?: SourceDetailScope | "sports",
+  scope?: SourceDetailScope | "sports" | "non-sports",
 ) {
   const filters = {
     queryKey: sourceDetailKeys.root,
     predicate: scope
       ? (query: { queryKey: QueryKey; state: { data: unknown } }) => {
           const key = query.queryKey;
+          if (scope === "non-sports") return !isSportsDetail(key);
           if (!isSportsDetail(key)) return false;
           if (scope === "sports") return true;
           const data = query.state.data;
@@ -73,6 +74,21 @@ export async function invalidateSourceDetails(
   };
   await client.cancelQueries(filters);
   await client.invalidateQueries(filters);
+}
+
+export async function invalidateSourceLibraryViews(client: QueryClient) {
+  const views = [
+    [QueryKeys.Series, "library"],
+    [QueryKeys.Movies, "library"],
+    [QueryKeys.Series, QueryKeys.Wanted],
+    [QueryKeys.Movies, QueryKeys.Wanted],
+    [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
+    [QueryKeys.Movies, QueryKeys.History],
+  ];
+  await Promise.all([
+    invalidateSourceDetails(client, "non-sports"),
+    ...views.map((queryKey) => client.invalidateQueries({ queryKey })),
+  ]);
 }
 
 export async function invalidateSportsSource(
