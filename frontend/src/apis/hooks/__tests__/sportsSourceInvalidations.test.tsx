@@ -41,6 +41,14 @@ const sourceScope: SportsFilters = {
   sourceKeys: ["source:8"],
 };
 const nativeScope: SportsFilters = { owner: sportarr.id };
+const explicitNativeScope: SportsFilters = {
+  owner: sportarr.id,
+  includeSources: true,
+  sourceKeys: [`arr:${sportarr.id}`],
+};
+const replacementRoots = [
+  { server_path: "/server/remaining", local_path: "/local/remaining" },
+];
 
 function setup() {
   const source: MediaSource = {
@@ -582,9 +590,10 @@ it.each(["refresh decision", "library owner"] as const)(
 );
 
 it.each(["scan", "roots"] as const)(
-  "refreshes the source event when a vendor %s changes recording availability",
+  "keeps mounted Sports current when an existing queued vendor %s job completes",
   async (operation) => {
     const { client, wrapper, source } = setup();
+    const rootEdit = operation === "roots";
     const vendor = {
       ...source,
       kind: "jellyfin" as const,
@@ -594,14 +603,18 @@ it.each(["scan", "roots"] as const)(
     const eventKey = sourceDetailKeys.item(70, "sports_event");
     client.removeQueries({ queryKey: eventKey, exact: true });
     let unavailable = false;
+    let removed = false;
     let reads = 0;
     const jobs = [QueryKeys.System, QueryKeys.Jobs];
+    client.setQueryData(jobs, [{ job_id: 31, status: "pending" }]);
     server.use(
       http.get("/api/sources/items/70", ({ request }) => {
         expect(new URL(request.url).searchParams.get("kind")).toBe(
           "sports_event",
         );
         reads++;
+        if (removed)
+          return HttpResponse.json({ error: "not_found" }, { status: 404 });
         return HttpResponse.json({
           id: 70,
           kind: "sports_event",
@@ -611,8 +624,26 @@ it.each(["scan", "roots"] as const)(
           server_missing: unavailable,
         });
       }),
+      http.get("/api/sports/history", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 7,
+              title: "Archive final",
+              origin: "source",
+              source_id: 8,
+              source_key: "source:8",
+              source_item_id: removed ? null : 70,
+            },
+          ],
+          total: 1,
+        }),
+      ),
       http.post("/api/system/media-sources/8/scan", () =>
-        HttpResponse.json({ job_id: 31 }, { status: 202 }),
+        HttpResponse.json(
+          { job_id: 31, session: "existing-scan" },
+          { status: 202 },
+        ),
       ),
       http.patch(
         "/api/system/media-sources/8/libraries/9",
@@ -624,7 +655,7 @@ it.each(["scan", "roots"] as const)(
             ],
             confirmed_removed: 1,
           });
-          unavailable = true;
+          removed = true;
           return HttpResponse.json({
             ...vendor.libraries[0],
             source_id: 8,
@@ -637,6 +668,8 @@ it.each(["scan", "roots"] as const)(
     const { result } = renderHook(
       () => ({
         event: useSourceItem(70, "sports_event"),
+        history: useSportsHistoryPagination(sourceScope),
+        all: useSportsHistoryPagination({ includeSources: true }),
         scan: useScanMediaSource(),
         roots: useUpdateServerSourceRoots(),
       }),
@@ -646,6 +679,12 @@ it.each(["scan", "roots"] as const)(
       expect(result.current.event.data).toMatchObject({
         server_missing: false,
       }),
+    );
+    await waitFor(() =>
+      expect(result.current.history.data?.data[0]?.source_item_id).toBe(70),
+    );
+    await waitFor(() =>
+      expect(result.current.all.data?.data[0]?.source_item_id).toBe(70),
     );
     await act(async () => {
       if (operation === "scan") {
@@ -661,26 +700,36 @@ it.each(["scan", "roots"] as const)(
         });
       }
     });
-    const rootEdit = operation === "roots";
     expect(reads).toBe(rootEdit ? 2 : 1);
     await waitFor(() =>
-      expect(result.current.event.data).toMatchObject({
-        server_missing: rootEdit,
-      }),
+      expect(result.current.event.data).toEqual(
+        rootEdit ? null : expect.objectContaining({ server_missing: false }),
+      ),
     );
-    unavailable = !rootEdit;
+    if (rootEdit) {
+      await waitFor(() =>
+        expect(result.current.history.data?.data[0]).toMatchObject({
+          source_key: "source:8",
+          source_item_id: null,
+        }),
+      );
+      expect(result.current.all.data?.data[0]?.source_item_id).toBeNull();
+    }
+    unavailable = true;
     await act(async () => {
       client.setQueryData(jobs, [{ job_id: 31, status: "completed" }]);
     });
     await waitFor(() =>
-      expect(result.current.event.data).toMatchObject({
-        server_missing: !rootEdit,
-      }),
+      expect(result.current.event.data).toEqual(
+        rootEdit ? null : expect.objectContaining({ server_missing: true }),
+      ),
     );
-    expect(reads).toBe(rootEdit ? 3 : 2);
-    expect(client.getQueryState(sibling)?.isInvalidated).toBe(!rootEdit);
+    await waitFor(() => expect(reads).toBe(rootEdit ? 3 : 2));
+    expect(client.getQueryState(sibling)?.isInvalidated).toBe(true);
     for (const key of untouched)
-      expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+      expect(client.getQueryState(key)?.isInvalidated).toBe(
+        key[0] === "source-detail" && key[2] === "league",
+      );
   },
 );
 
@@ -777,5 +826,314 @@ it.each(["jellyfin", "emby"] as const)(
     for (const key of [...untouched, ...untouchedLists]) {
       expect(client.getQueryState(key)?.isInvalidated).toBe(false);
     }
+  },
+);
+
+it.each([
+  ["jellyfin", "missing cache"],
+  ["emby", "failed list with cached owner"],
+  ["jellyfin", "partial list"],
+] as const)(
+  "deleting %s with a %s refreshes mounted former, removed and combined Sports history",
+  async (kind, visibility) => {
+    const { client, wrapper, source } = setup();
+    const emptyList = {
+      data: [],
+      availability: {
+        sports: {
+          browsable: false,
+          searchable: false,
+          retained: true,
+          removed: true,
+          retained_source_ids: [],
+        },
+      },
+    };
+    if (visibility === "missing cache")
+      client.removeQueries({ queryKey: mediaSourcesKey });
+    else
+      client.setQueryData(
+        mediaSourcesKey,
+        visibility === "failed list with cached owner"
+          ? {
+              ...emptyList,
+              data: [{ ...source, kind, media_server_instance_id: "saved" }],
+            }
+          : emptyList,
+      );
+    let removed = false;
+    const reads = { former: 0, removed: 0, all: 0, other: 0, native: 0 };
+    server.use(
+      http.get("/api/system/media-sources", () =>
+        visibility === "partial list"
+          ? HttpResponse.json(emptyList)
+          : HttpResponse.json({ error: "unavailable" }, { status: 503 }),
+      ),
+      http.delete("/api/system/media-server-instances/saved", () => {
+        removed = true;
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.get("/api/sports/history", ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        const key =
+          params.has("arr_instance_id") || params.get("sources") !== "1"
+            ? "native"
+            : params.getAll("source_key[]").includes("source:80")
+              ? "other"
+              : params.getAll("source_key[]").includes("source:8")
+                ? "former"
+                : params.getAll("source_key[]").includes("source:removed")
+                  ? "removed"
+                  : "all";
+        reads[key]++;
+        const visible =
+          key === "native" ||
+          key === "other" ||
+          key === "all" ||
+          (key === "former" ? !removed : removed);
+        return HttpResponse.json({
+          data: visible
+            ? [
+                {
+                  id: 7,
+                  title: key === "native" ? "Native final" : "Archive final",
+                  origin: key === "native" ? "arr" : "source",
+                  arr_instance_id: key === "native" ? sportarr.id : null,
+                  source_id:
+                    key === "native"
+                      ? null
+                      : key === "other"
+                        ? 80
+                        : removed
+                          ? null
+                          : 8,
+                  source_key:
+                    key === "native"
+                      ? undefined
+                      : key === "other"
+                        ? "source:80"
+                        : removed
+                          ? "source:removed"
+                          : "source:8",
+                },
+              ]
+            : [],
+          total: visible ? 1 : 0,
+        });
+      }),
+    );
+    const { result, unmount } = renderHook(
+      () => ({
+        former: useSportsHistoryPagination(sourceScope),
+        removed: useSportsHistoryPagination({
+          includeSources: true,
+          sourceKeys: ["source:removed"],
+        }),
+        all: useSportsHistoryPagination({ includeSources: true }),
+        native: useSportsHistoryPagination(explicitNativeScope),
+        other: useSportsHistoryPagination({
+          includeSources: true,
+          sourceKeys: ["source:80"],
+        }),
+        remove: useDeleteMediaServerInstance(kind, "saved", {
+          inlineErrors: true,
+        }),
+      }),
+      { wrapper },
+    );
+    await waitFor(() =>
+      expect(reads).toEqual({
+        former: 1,
+        removed: 1,
+        all: 1,
+        other: 1,
+        native: 1,
+      }),
+    );
+    await waitFor(() => expect(result.current.former.data?.total).toBe(1));
+    await act(async () => {
+      await result.current.remove.mutateAsync();
+    });
+    expect(removed).toBe(true);
+    await waitFor(() => expect(result.current.former.data?.total).toBe(0));
+    expect(result.current.removed.data?.data[0]?.source_key).toBe(
+      "source:removed",
+    );
+    expect(result.current.all.data?.data[0]?.source_key).toBe("source:removed");
+    expect(result.current.native.data?.data[0]?.title).toBe("Native final");
+    expect(reads).toEqual({
+      former: 2,
+      removed: 2,
+      all: 2,
+      other: 2,
+      native: 1,
+    });
+    unmount();
+  },
+);
+
+it.each([
+  ["scan", 80, 89],
+  ["roots", 80, 89],
+] as const)(
+  "vendor %s completion refreshes a recording moved from source %s library %s",
+  async (operation, oldSourceId, oldLibraryId) => {
+    const { client, wrapper, source } = setup();
+    const vendor = { ...source, kind: "jellyfin" as const };
+    let moved = false;
+    let eventReads = 0;
+    let memberReads = 0;
+    let nativeReads = 0;
+    server.use(
+      http.get("/api/sources/items/71", () => {
+        eventReads++;
+        return HttpResponse.json({
+          id: 71,
+          kind: "sports_event",
+          title: "Moved final",
+          source_id: moved ? 8 : oldSourceId,
+          library_id: moved ? 9 : oldLibraryId,
+          group_id: moved ? 17 : 27,
+        });
+      }),
+      http.get("/api/sources/groups/27/items", () => {
+        memberReads++;
+        return HttpResponse.json({
+          data: moved
+            ? []
+            : [
+                {
+                  id: 71,
+                  kind: "sports_event",
+                  title: "Moved final",
+                  source_id: oldSourceId,
+                  library_id: oldLibraryId,
+                },
+              ],
+          total: moved ? 0 : 1,
+        });
+      }),
+      http.get("/api/sports/wanted", ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        if (params.has("arr_instance_id") || params.get("sources") !== "1") {
+          nativeReads++;
+          return HttpResponse.json({
+            data: [
+              {
+                id: 7,
+                title: "Native final",
+                origin: "arr",
+                arr_instance_id: sportarr.id,
+              },
+            ],
+            total: 1,
+          });
+        }
+        const keys = params.getAll("source_key[]");
+        const owner = moved ? 8 : oldSourceId;
+        const visible = !keys.length || keys.includes(`source:${owner}`);
+        return HttpResponse.json({
+          data: visible
+            ? [
+                {
+                  id: 71,
+                  title: "Moved final",
+                  origin: "source",
+                  source_id: owner,
+                  source_key: `source:${owner}`,
+                  source_kind: "jellyfin",
+                  source_item_id: 71,
+                  source_group_id: moved ? 17 : 27,
+                  league_id: null,
+                  arr_instance_id: null,
+                  missing_subtitles: ["en"],
+                  audio_language: [],
+                },
+              ]
+            : [],
+          total: visible ? 1 : 0,
+        });
+      }),
+      http.post("/api/system/media-sources/8/scan", () =>
+        HttpResponse.json(
+          { job_id: 31, session: "existing-scan" },
+          { status: 202 },
+        ),
+      ),
+      http.patch("/api/system/media-sources/8/libraries/9", () =>
+        HttpResponse.json({
+          ...source.libraries[0],
+          source_id: 8,
+          removed_items: 0,
+          job_id: 31,
+        }),
+      ),
+    );
+    const { result, unmount } = renderHook(
+      () => ({
+        event: useSourceItem(71, "sports_event"),
+        members: useSourceLeagueEvents(27),
+        old: useSportsWantedPagination({
+          includeSources: true,
+          sourceKeys: [`source:${oldSourceId}`],
+        }),
+        destination: useSportsWantedPagination(sourceScope),
+        all: useSportsWantedPagination({ includeSources: true }),
+        native: useSportsWantedPagination(explicitNativeScope),
+        scan: useScanMediaSource(),
+        roots: useUpdateServerSourceRoots(),
+      }),
+      { wrapper },
+    );
+    await waitFor(() =>
+      expect(result.current.event.data).toMatchObject({
+        source_id: oldSourceId,
+        library_id: oldLibraryId,
+      }),
+    );
+    await waitFor(() => expect(result.current.members.data).toHaveLength(1));
+    await waitFor(() => expect(result.current.native.data?.total).toBe(1));
+    await waitFor(() => expect(result.current.old.data?.total).toBe(1));
+    await act(async () => {
+      if (operation === "scan") await result.current.scan.mutateAsync(vendor);
+      else {
+        const updated = await result.current.roots.mutateAsync({
+          sourceId: 8,
+          libraryId: 9,
+          roots: replacementRoots,
+          confirmedRemoved: 0,
+        });
+        expect(updated).toMatchObject({
+          id: 9,
+          source_id: 8,
+          removed_items: 0,
+          job_id: 31,
+        });
+      }
+    });
+    // An immediate root edit knows only the destination, so it must leave the previous owner alone.
+    expect(eventReads).toBe(1);
+    expect(memberReads).toBe(1);
+    moved = true;
+    await act(async () => {
+      client.setQueryData(
+        [QueryKeys.System, QueryKeys.Jobs],
+        [{ job_id: 31, status: "completed" }],
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.event.data).toMatchObject({
+        source_id: 8,
+        library_id: 9,
+      }),
+    );
+    await waitFor(() => expect(result.current.members.data).toEqual([]));
+    await waitFor(() => expect(result.current.old.data?.total).toBe(0));
+    expect(result.current.destination.data?.data[0]?.source_id).toBe(8);
+    expect(result.current.all.data?.data[0]?.source_id).toBe(8);
+    expect(eventReads).toBe(2);
+    expect(memberReads).toBe(2);
+    expect(nativeReads).toBe(1);
+    unmount();
   },
 );

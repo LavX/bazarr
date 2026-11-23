@@ -10,7 +10,7 @@ import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import {
   invalidateSportsSource,
-  type SourceDetailScope,
+  type SportsSourceScope,
 } from "@/apis/queries/sourceDetails";
 import api from "@/apis/raw";
 import { withInlineErrors } from "@/apis/raw/inlineWrites";
@@ -169,44 +169,55 @@ function sourceOwnsSports(
 
 export async function refreshMediaSources(
   client: QueryClient,
-  scope?: SourceDetailScope & { removed?: boolean },
+  sports?: SportsSourceScope,
 ) {
   await Promise.all([
     client.invalidateQueries({ queryKey: mediaSourcesKey, exact: true }),
-    ...(scope ? [invalidateSportsSource(client, scope)] : []),
+    ...(sports ? [invalidateSportsSource(client, sports)] : []),
   ]);
+}
+
+function refreshAfterSourceScan(client: QueryClient, jobId: number | null) {
+  // The scan can take over a file from another source. Its job status does
+  // not report the previous owner, so refresh all standalone Sports owners.
+  return refreshWhenJobFinishes(client, jobId, () =>
+    refreshMediaSources(client, {}),
+  );
 }
 
 function sportsRemovalScope(
   client: QueryClient,
   source: MediaSource,
   library?: SourceLibrary,
-) {
+): SportsSourceScope | undefined {
   // A source can own retained activity after its last sports library is gone.
   const ownsSports = library
     ? library.content_kind === "sports"
     : sourceOwnsSports(client, source, true);
   return ownsSports
-    ? { sourceId: source.id, libraryId: library?.id, removed: !library }
+    ? {
+        owner: { sourceId: source.id, libraryId: library?.id },
+        includeRemoved: !library,
+      }
     : undefined;
 }
 
 export async function linkedServerRemovalScope(
   client: QueryClient,
   instanceId: string,
-) {
-  const cached =
-    client.getQueryData<Awaited<ReturnType<typeof api.mediaSources.list>>>(
-      mediaSourcesKey,
-    );
+): Promise<SportsSourceScope> {
   // Capture the linked source before the connection DELETE cascades its row.
   const list = await client
     .fetchQuery({ ...mediaSourcesQuery, staleTime: 0, retry: false })
-    .catch(() => cached);
+    .catch(() => undefined);
   const source = list?.data.find(
     (row) => row.media_server_instance_id === instanceId,
   );
-  return source ? sportsRemovalScope(client, source) : undefined;
+  // The 204 carries no owner. A failed or incomplete read needs the wider scope.
+  return {
+    owner: source ? { sourceId: source.id } : undefined,
+    includeRemoved: true,
+  };
 }
 
 export function useUpdateServerSourceRoots() {
@@ -236,13 +247,12 @@ export function useUpdateServerSourceRoots() {
     onSuccess: async (updated, { sourceId }) => {
       const scope =
         updated.content_kind === "sports"
-          ? { sourceId, libraryId: updated.id }
+          ? { owner: { sourceId, libraryId: updated.id } }
           : undefined;
-      const refresh = () => refreshMediaSources(client, scope);
       // A root edit can remove indexed items immediately and discover new ones in its scan.
-      await refresh();
-      if (scope && typeof updated.job_id === "number") {
-        refreshWhenJobFinishes(client, updated.job_id, refresh);
+      await refreshMediaSources(client, scope);
+      if (typeof updated.job_id === "number") {
+        refreshAfterSourceScan(client, updated.job_id);
       }
     },
   });
@@ -265,7 +275,7 @@ export function useWriteMediaSource({
       write,
     }: {
       write: () => Promise<unknown>;
-      sportsScope?: SourceDetailScope;
+      sportsScope?: SportsSourceScope;
     }) => withInlineErrors(write),
     onSuccess: (_, { sportsScope }) => refreshMediaSources(client, sportsScope),
   });
@@ -280,7 +290,7 @@ export function useWriteMediaSource({
       write,
       sportsScope:
         source && sportsSource && refreshSports
-          ? { sourceId: source.id, libraryId: library?.id }
+          ? { owner: { sourceId: source.id, libraryId: library?.id } }
           : undefined,
     };
   };
@@ -322,16 +332,7 @@ export function useScanMediaSource() {
   return useMutation({
     mutationFn: (source: MediaSource) =>
       withInlineErrors(() => api.mediaSources.scan(source.id)),
-    onSuccess: (jobId, source) => {
-      const scope = source.libraries.some(
-        ({ content_kind: kind }) => kind === "sports",
-      )
-        ? { sourceId: source.id }
-        : undefined;
-      return refreshWhenJobFinishes(client, jobId, () =>
-        refreshMediaSources(client, scope),
-      );
-    },
+    onSuccess: (jobId) => refreshAfterSourceScan(client, jobId),
   });
 }
 

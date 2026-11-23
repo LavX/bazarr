@@ -17,6 +17,11 @@ export interface SourceDetailScope {
   libraryId?: number;
 }
 
+export interface SportsSourceScope {
+  owner?: SourceDetailScope;
+  includeRemoved?: boolean;
+}
+
 function matchesOwner(data: unknown, scope: SourceDetailScope) {
   if (typeof data !== "object" || data === null || !("source_id" in data))
     return undefined;
@@ -34,7 +39,7 @@ function isSportsDetail(key: QueryKey) {
 
 export async function invalidateSourceDetails(
   client: QueryClient,
-  scope?: SourceDetailScope,
+  scope?: SourceDetailScope | "sports",
 ) {
   const filters = {
     queryKey: sourceDetailKeys.root,
@@ -42,6 +47,7 @@ export async function invalidateSourceDetails(
       ? (query: { queryKey: QueryKey; state: { data: unknown } }) => {
           const key = query.queryKey;
           if (!isSportsDetail(key)) return false;
+          if (scope === "sports") return true;
           const data = query.state.data;
           if (Array.isArray(data)) {
             const owners = data.map((row) => matchesOwner(row, scope));
@@ -71,7 +77,7 @@ export async function invalidateSourceDetails(
 
 export async function invalidateSportsSource(
   client: QueryClient,
-  scope: SourceDetailScope & { removed?: boolean },
+  { owner, includeRemoved = false }: SportsSourceScope,
 ) {
   const sports = {
     queryKey: [QueryKeys.Sports],
@@ -84,13 +90,16 @@ export async function invalidateSportsSource(
         filters.includeSources !== true
       )
         return false;
+      // Activity routes with a legacy Arr owner are Arr-only even with sources=1.
+      if ("owner" in filters && typeof filters.owner === "number") return false;
       const keys = "sourceKeys" in filters ? filters.sourceKeys : undefined;
-      return (
-        !Array.isArray(keys) ||
-        keys.length === 0 ||
-        keys.includes(`source:${scope.sourceId}`) ||
-        (scope.removed === true && keys.includes("source:removed"))
-      );
+      if (!Array.isArray(keys) || keys.length === 0) return true;
+      return keys.some((key: unknown) => {
+        if (key === "source:removed") return includeRemoved;
+        return owner
+          ? key === `source:${owner.sourceId}`
+          : typeof key === "string" && key.startsWith("source:");
+      });
     },
   };
   const badges = {
@@ -104,6 +113,6 @@ export async function invalidateSportsSource(
   await Promise.all([
     client.invalidateQueries(sports),
     client.invalidateQueries(badges),
-    invalidateSourceDetails(client, scope),
+    invalidateSourceDetails(client, owner ?? "sports"),
   ]);
 }

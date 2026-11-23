@@ -134,6 +134,70 @@ def _indexed(saved, library_id):
     return {row.external_id: row for row in repository.library_items(library_id, saved.db)}
 
 
+@pytest.mark.parametrize('whole_source', [False, True], ids=['library', 'source'])
+@pytest.mark.parametrize('running', [False, True], ids=['pending', 'running'])
+def test_manual_scan_follows_the_existing_job(saved, whole_source, running):
+    from media_sources import scanner
+
+    source = _register(saved, library=_library(saved))
+    library_id = source['libraries'][0]['id']
+    job_id = scanner.scan_media_source(source['id'], None if whole_source else library_id)
+    url = f"{SOURCES}/{source['id']}" + ('' if whole_source else f'/libraries/{library_id}')
+    responses = []
+
+    def request_scan():
+        response = saved.client.post(f'{url}/scan', headers=HEADERS)
+        assert response.status_code == 202, response.json
+        assert response.json['job_id'] == job_id
+        assert response.json['session']
+        assert saved.jobs.get_job_status(job_id) == ('running' if running else 'pending')
+        responses.append(response)
+
+    if running:
+        saved.on_page = request_scan
+    else:
+        request_scan()
+    job = saved.jobs._reserve_next_job()
+    assert job.job_id == job_id
+    assert saved.jobs._reserve_next_job() is None
+    assert saved.jobs._run_job(job)
+    assert responses
+    assert saved.jobs._reserve_next_job() is None
+    assert saved.jobs.get_job_status(job_id) == 'completed'
+
+
+def test_root_edit_follows_pending_scan_and_removes_sports_item(saved):
+    from media_sources import scanner
+
+    source = _register(saved, library=_library(saved, 'sports', '/sports', content_kind='sports'))
+    library_id = source['libraries'][0]['id']
+    prior = video(saved.root / 'Formula 1' / '2025' / 'Round 3.mkv')
+    saved.rows['sports', 'Movie,Episode,Video'] = [
+        _item('prior', f'/sports/{prior.relative_to(saved.root)}', Type='Video')]
+    _scan(saved, source['id'], library_id)
+    prior_id = _indexed(saved, library_id)['prior'].id
+    assert saved.client.get(f'/api/sources/items/{prior_id}', headers=HEADERS).status_code == 200
+    job_id = scanner.scan_media_source(source['id'], library_id)
+    replacement = video(saved.other / 'Formula 1' / '2025' / 'Round 4.mkv')
+    saved.rows['sports', 'Movie,Episode,Video'] = [
+        _item('replacement', f'/mapped/{replacement.relative_to(saved.other)}', Type='Video')]
+
+    response = saved.client.patch(f"{SOURCES}/{source['id']}/libraries/{library_id}", headers=HEADERS, json={
+        'roots': [{'server_path': '/mapped', 'local_path': str(saved.other)}], 'confirmed_removed': 1})
+
+    assert response.status_code == 200, response.json
+    assert response.json['removed_items'] == 1
+    assert response.json['job_id'] == job_id
+    assert saved.client.get(f'/api/sources/items/{prior_id}', headers=HEADERS).status_code == 404
+    assert prior.exists()
+    job = saved.jobs._reserve_next_job()
+    assert job.job_id == job_id
+    assert saved.jobs._reserve_next_job() is None
+    assert saved.jobs._run_job(job)
+    assert job.status == 'completed', job.error
+    assert set(_indexed(saved, library_id)) == {'replacement'}
+
+
 def test_validate_new_server_roots_without_mutation(saved):
     url = f'{SOURCES}/server-roots/validate'
     roots = _library(saved)['roots']

@@ -1497,7 +1497,7 @@ def scan_media_source(source_id, library_id=None, job_id=None, *, retry_on_confi
     """The scan as a job. Called without a job id it queues itself, so it shows in the Jobs drawer."""
     if not job_id:
         return jobs_queue.add_job_from_function(f"Scanning media source {_source_name(source_id)}",
-                                                is_progress=True)
+                                                is_progress=True, return_existing=True)
     reason = disabled_reason(source_id, library_id)
     if reason:
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message=reason)
