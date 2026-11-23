@@ -911,7 +911,7 @@ def test_rollback_consent_binds_the_bundle_identity_even_when_the_previous_versi
 
 
 @pytest.mark.parametrize("replacement", ["id", "python_path", "env_key"])
-def test_rollback_confirmation_rejects_a_replaced_retained_identity_with_identical_version_and_bundle(
+def test_rollback_confirmation_checks_the_retained_release_and_ignores_derived_environment_metadata(
         client, rollback_store, replacement):
     import sqlalchemy as sa
     from provider_hub import releases, service, state, state_store
@@ -934,6 +934,10 @@ def test_rollback_confirmation_rejects_a_replaced_retained_identity_with_identic
     replaced = service._previous_release("providerhub")
     assert (replaced.version, replaced.bundle_path, replaced.bundle_digest) == (
         target.version, target.bundle_path, target.bundle_digest)
+    if replacement == "env_key":
+        assert _get(client, path).json["confirmation_identity"] == identity
+        assert _rollback(client, "providerhub", confirmation_identity=identity).status_code == 200
+        return
     before = state.load_state()
     releases_before = state_store.list_releases("providerhub")
     response = _rollback(client, "providerhub", confirmation_identity=identity)
@@ -1339,6 +1343,8 @@ def test_legacy_catalog_binding_requires_matching_evidence(
     unsupported = (binding.startswith("replaced-url") or binding == "new-registration"
                    or (omitted_url and not binding.startswith("omitted-url-match")))
     pending = not binding.endswith("active-only")
+    if binding in {"v2.7.0", "v2.7.2"}:
+        source.update(last_checked_at="2026-11-22T00:00:00Z", resolved_commit=staged["source"]["commit"])
     if binding.startswith("replaced-url"):
         source["url"] = "https://github.com/example/replacement-catalog/blob/main/catalog.json"
         source.update(last_checked_at="2026-11-22T00:00:00Z", resolved_commit=staged["source"]["commit"])
