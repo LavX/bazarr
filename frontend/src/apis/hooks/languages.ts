@@ -10,11 +10,12 @@ export function useLanguages(history?: boolean) {
   });
 }
 
-export function useAudioLanguages() {
+export function useAudioLanguages(enabled = true) {
   return useQuery({
     queryKey: [QueryKeys.System, QueryKeys.Languages, "audio"],
     queryFn: () => api.system.audioLanguages(),
     staleTime: 60_000,
+    enabled,
   });
 }
 

@@ -96,6 +96,24 @@ def get_roots(library_id, target=None):
         sa.select(Roots).where(Roots.c.library_id == library_id).order_by(Roots.c.id)).all()
 
 
+def configured_library_root_paths(target=None):
+    """All configured local paths, including disabled libraries."""
+    return _target(target).execute(sa.select(Roots.c.local_path).distinct()).scalars().all()
+
+
+def enabled_item_roots(item_id, source_id, library_id, path, target=None):
+    """Current local roots for a request whose item, path and owners still match."""
+    return _target(target).execute(
+        sa.select(Roots.c.local_path)
+        .select_from(Items.join(Libraries, sa.and_(Items.c.library_id == Libraries.c.id,
+                                                 Items.c.source_id == Libraries.c.source_id))
+                     .join(Sources, Libraries.c.source_id == Sources.c.id)
+                     .join(Roots, Libraries.c.id == Roots.c.library_id))
+        .where(Items.c.id == item_id, Items.c.source_id == source_id, Items.c.library_id == library_id,
+               Items.c.path == path, Libraries.c.enabled == 1, Sources.c.enabled == 1)
+    ).scalars().all()
+
+
 def record_library_scan(library_id, status, message=None, target=None):
     _target(target).execute(sa.update(Libraries).where(Libraries.c.id == library_id).values(
         last_scan_status=status, last_scan_message=message, updated_at=datetime.now()))
@@ -445,6 +463,15 @@ def blacklist_pairs(item_kind, target=None):
     them."""
     return [(row.provider, row.subs_id) for row in _target(target).execute(
         sa.select(Blacklist.c.provider, Blacklist.c.subs_id).where(Blacklist.c.item_kind == item_kind)).all()]
+
+
+def retained_activity_by_kind(target=None):
+    """History and blacklist rows can outlive both the source and its library."""
+    by_kind = {'movie': 'movie', 'series': 'episode', 'sports': 'sports_event'}
+    checks = [sa.or_(sa.exists().where(History.c.item_kind == item_kind),
+                     sa.exists().where(Blacklist.c.item_kind == item_kind)).label(content_kind)
+              for content_kind, item_kind in by_kind.items()]
+    return _target(target).execute(sa.select(*checks)).mappings().one()
 
 
 # Enabled flags, overlap and holders

@@ -1,5 +1,6 @@
 interface Settings {
   general: Settings.General;
+  media_sources?: { visible: boolean };
   discover?: {
     tmdb_configured: boolean;
     /** Whether the reader saved a key of their own, never the key itself. */

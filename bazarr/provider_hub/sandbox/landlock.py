@@ -348,14 +348,23 @@ def _open_grant(path: str, dev, ino) -> int | None:
     return fd
 
 
-def _add_path_rule(ruleset_fd: int, grant: Grant, rights: int, handled_fs: int) -> bool:
+def _add_path_rule(ruleset_fd: int, grant: Grant, rights: int, handled_fs: int, *, regular_file: bool = False) -> bool:
     """Add one path-beneath rule. Returns False when the path does not exist."""
     path, dev, ino = _split_grant(grant)
     fd = _open_grant(path, dev, ino)
     if fd is None:
         return False
     try:
-        mode = os.fstat(fd).st_mode
+        info = os.fstat(fd)
+        mode = info.st_mode
+        if regular_file:
+            if not stat_module.S_ISREG(mode):
+                raise LandlockError(errno.EINVAL, "exact-file grant is not a regular file: %s" % path)
+            if rights & FS_EXECUTE:
+                if not mode & 0o111:
+                    raise LandlockError(errno.EINVAL, "execute-file grant has no execute bit: %s" % path)
+            elif info.st_nlink != 1:
+                raise LandlockError(errno.EINVAL, "read-file grant has more than one link: %s" % path)
         allowed = rights & handled_fs
         if not stat_module.S_ISDIR(mode):
             allowed &= FILE_RIGHTS
@@ -393,6 +402,8 @@ def apply_ruleset(
     *,
     read_only: Iterable[Grant] = (),
     read_write: Iterable[Grant] = (),
+    read_files: Iterable[Grant] = (),
+    execute_files: Iterable[Grant] = (),
     devices: Iterable[Grant] = (),
     resolve_unix: Iterable[Grant] = (),
     connect_ports: Iterable[int] | None = None,
@@ -403,9 +414,11 @@ def apply_ruleset(
     """Restrict the calling thread (and its future children) irreversibly.
 
     Call this from a single-threaded process right before ``execve``.
-    ``read_write`` paths must exist (``LandlockError`` otherwise: a worker must
+    ``read_write``, ``read_files`` and ``execute_files`` paths must exist (``LandlockError`` otherwise: a worker must
     not start with fewer rules than asked); missing ``read_only``, ``devices``
     and ``resolve_unix`` paths are skipped and reported.
+    ``read_files`` grants only file reads for the named regular files.
+    ``execute_files`` grants read and execute for the named regular executables.
 
     ``deny_connect_ports`` (with ``connect_ports`` of ``None``) refuses TCP connections to just those
     ports where the kernel has network rules (ABI 4 and above) and leaves binding and every other
@@ -462,6 +475,12 @@ def apply_ruleset(
         for grant in read_write:
             if not _add_path_rule(ruleset_fd, grant, RIGHTS_READ_WRITE, handled_fs):
                 raise LandlockError(errno.ENOENT, "read-write path does not exist: %s" % _split_grant(grant)[0])
+        for grant in read_files:
+            if not _add_path_rule(ruleset_fd, grant, FS_READ_FILE, handled_fs, regular_file=True):
+                raise LandlockError(errno.ENOENT, "read-file path does not exist: %s" % _split_grant(grant)[0])
+        for grant in execute_files:
+            if not _add_path_rule(ruleset_fd, grant, FS_READ_FILE | FS_EXECUTE, handled_fs, regular_file=True):
+                raise LandlockError(errno.ENOENT, "execute-file path does not exist: %s" % _split_grant(grant)[0])
         if handled_net:
             for port in ports or ():
                 _add_port_rule(ruleset_fd, port)

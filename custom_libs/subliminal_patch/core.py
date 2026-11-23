@@ -437,6 +437,14 @@ class ProviderExcludedWhileQueuedError(ProviderExcludedError):
     provider excluded once it got there. Handled like any exclusion."""
 
 
+class ProviderItemExcludedError(ProviderExcludedError):
+    """A provider cannot serve this item, but remains usable for others."""
+
+    def __init__(self, provider, reason):
+        super().__init__(provider)
+        self.reason = reason
+
+
 class ProviderBusyError(Exception):
     """A request that could not get its turn on the provider's worker within
     its own timeout. Deliberately not a ProviderExcludedError: an excluded
@@ -1294,6 +1302,10 @@ class SZProviderPool(ProviderPool):
 
             return finish(out, "success" if out else "empty")
 
+        except ProviderItemExcludedError as error:
+            logger.info('Provider %r was excluded for this item: %s', provider, error.reason)
+            return finish([], "skipped", "provider_excluded")
+
         except ProviderExcludedError:
             # Refused by the worker once the request got its turn: the provider
             # went on backoff or was discarded while it waited. Nothing reached
@@ -1629,6 +1641,11 @@ class SZProviderPool(ProviderPool):
                         self.post_download_hook(subtitle)
 
                     break
+                except ProviderItemExcludedError as error:
+                    logger.info('Provider %r was excluded for this item: %s', subtitle.provider_name, error.reason)
+                    subtitle.skip_reason = 'provider_excluded'
+                    return False
+
                 except ProviderCallInterruptedError:
                     subtitle.skip_reason = 'provider_excluded'
                     return False

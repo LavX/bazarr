@@ -12,6 +12,7 @@ describe("connection tabs", () => {
       "sonarr",
       "radarr",
       "sportarr",
+      "folders",
       "plex",
       "jellyfin",
       "emby",

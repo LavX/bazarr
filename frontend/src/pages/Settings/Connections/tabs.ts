@@ -6,6 +6,7 @@ export const CONNECTION_TABS = [
   "sonarr",
   "radarr",
   "sportarr",
+  "folders",
   "plex",
   "jellyfin",
   "emby",
