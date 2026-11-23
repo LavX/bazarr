@@ -376,13 +376,11 @@ class SyncOutputOwnerIndex:
         self._owners = {}
 
     @staticmethod
-    def _load_owners():
+    def _registry_rows(target=None):
         from app.database import database, select, TableEpisodes, TableMovies, TableSportsEvents, TableArrInstances
-        from utilities.helper import get_target_folder
-        from utilities.path_mappings import path_mappings
-        from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
-        owners = {}
+        connection = database if target is None else target
+        rows = []
         for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie'),
                                   (TableSportsEvents, 'sports')):
             query = select(table.path, table.arr_instance_id)
@@ -390,7 +388,18 @@ class SyncOutputOwnerIndex:
                 query = query.add_columns(TableArrInstances.path_mappings).join(
                     TableArrInstances, table.arr_instance_id == TableArrInstances.id).where(
                     TableArrInstances.kind == 'sportarr')
-            for row in database.execute(query).all():
+            rows.append((media_type, tuple(connection.execute(query.order_by(table.id)).all())))
+        return tuple(rows)
+
+    @staticmethod
+    def _map_registry_rows(registry_rows):
+        from utilities.helper import get_target_folder
+        from utilities.path_mappings import path_mappings
+        from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+
+        owners = {}
+        for media_type, rows in registry_rows:
+            for row in rows:
                 if not row.path:
                     continue
                 # Disabled sports owners retain physical files. They still reserve
@@ -407,6 +416,10 @@ class SyncOutputOwnerIndex:
                 for folder in folders:
                     owners.setdefault((folder, stem), set()).add(mapped)
         return owners
+
+    @staticmethod
+    def _load_owners():
+        return SyncOutputOwnerIndex._map_registry_rows(SyncOutputOwnerIndex._registry_rows())
 
     def folder_is_shared(self, directory):
         return False

@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, subtitle_write_locks,
-                                             regular_subtitle_version, subtitle_mutation,
+                                             regular_subtitle_version, subtitle_mutation, subtitle_source_version,
                                              sync_output_owner_is_unique, write_subtitle_file)
 from subliminal_patch.core_persistent import download_best_subtitles
 
@@ -37,6 +37,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                        previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
                        arr_instance_id=None, source=None, auto_translate=True):
     if not languages:
+        return None
+
+    video_version = subtitle_source_version(path) if source is not None else None
+    if source is not None and video_version is None:
         return None
 
     # A media source item is described by its context. Its publication type is what the media servers hear
@@ -200,7 +204,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                     writer = partial(_write_source_download, path, source=source,
                                                      language=source_language, recheck_missing=check_if_still_required,
                                                      is_upgrade=is_upgrade, written_paths=written_paths,
-                                                     on_publish=publish)
+                                                     on_publish=publish, video_version=video_version)
                                     if is_upgrade:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
@@ -315,7 +319,7 @@ def check_missing_languages_source(source, *, external_subtitles=None, target=No
 
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
-                           written_paths, on_publish):
+                           written_paths, on_publish, video_version=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
@@ -335,6 +339,8 @@ def _write_source_download(video_path, destination, content, *, source, language
                 current, connection, external_subtitles):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
+            if video_version is not None and subtitle_source_version(video_path) != video_version:
+                raise SubtitleDestinationChanged('The media file changed while searching for subtitles')
             if os.path.lexists(destination) and (not is_upgrade or regular_subtitle_version(destination) is None):
                 raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
             if recheck_missing and language not in check_missing_languages_source(

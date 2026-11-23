@@ -17,7 +17,8 @@ from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
 from subtitles.indexer.entries import entry_codec, normalize_codec
-from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path, sync_output_owner_is_unique
+from subtitles.tools.subsync_engines import (SYNC_ENGINES, SyncOutputOwnerIndex, sync_engine_from_output_path,
+                                             sync_output_owner_is_unique)
 
 import re as _re_combine
 
@@ -295,6 +296,8 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
     media_stems = set()
     if video_path is not None:
         video_filename = os.path.basename(video_path)
+        if ownership_index is None:
+            ownership_index = SyncOutputOwnerIndex()
     if video_filename is not None:
         video_stem = _normalized_video_stem(os.path.splitext(video_filename)[0])
         media_folder = (os.path.dirname(video_path) or '.') if video_path is not None else dest_folder
@@ -324,6 +327,13 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
             continue
 
         if video_path is not None:
+            if not sync_output_owner_is_unique(video_path, subtitle_path, ownership_index=ownership_index):
+                subtitles.pop(subtitle, None)
+                continue
+            if _normalized_video_stem(os.path.splitext(subtitle)[0]) == video_stem:
+                # A registered video can include the engine name in its own basename.
+                subtitles.setdefault(subtitle, None)
+                continue
             stem, extension = os.path.splitext(subtitle)
             source_path = os.path.join(dest_folder, stem.rsplit('.', 1)[0] + extension)
             if source_path not in ownership:

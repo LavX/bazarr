@@ -65,6 +65,8 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
         stems = super().conflicting_stems(video, subtitle_path)
         stem = _normalized_media_stem(subtitle_path)
         if sync_engine_from_output_path(subtitle_path):
+            if stem == _normalized_media_stem(video):
+                return stems
             stem = stem.rsplit('.', 1)[0]
             stems.add(stem)
             subtitle_path = stem + os.path.splitext(subtitle_path)[1]
@@ -118,12 +120,16 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
 
     def __init__(self):
         super().__init__()
-        self._prepared_paths = None
+        self._prepared_owners = None
+
+    def _registry_snapshot(self, target=None):
+        return self._source_owner_paths(target), self._registry_rows(target)
 
     def _load_owners(self):
-        self._prepared_paths = self._source_owner_paths(None)
-        owners = self._map_source_owners(self._prepared_paths)
-        for key, paths in SyncOutputOwnerIndex._load_owners().items():
+        source_paths, registry_rows = self._registry_snapshot()
+        self._prepared_owners = source_paths, registry_rows
+        owners = self._map_source_owners(source_paths)
+        for key, paths in self._map_registry_rows(registry_rows).items():
             owners.setdefault(key, set()).update(paths)
         return owners
 
@@ -149,11 +155,11 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         for _ in range(2):
             self._loaded = False
             self._owners = {}
-            self._prepared_paths = None
+            self._prepared_owners = None
             destination_setting = settings.general.subfolder, get_subtitle_destination_folder()
             prepared = prepare() if prepare is not None else None
             shared = self._needs_registry_guard(source, destination, destination_setting[1])
-            if shared and self._prepared_paths is None:
+            if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
             # A scanner with the conflicting lock finishes outside this transaction.
             # Retrying after rollback leaves it free to finish any remaining row writes.
@@ -165,7 +171,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     with source_item_publication(source, shared=shared) as (current, connection):
                         if destination_setting != (settings.general.subfolder, get_subtitle_destination_folder()):
                             break
-                        if shared and current is not None and self._prepared_paths != self._source_owner_paths(connection):
+                        if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
                             break
                         if current is not None:
                             state = repository.item_state(current.item_id, connection)
