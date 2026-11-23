@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import {
   keepPreviousData,
   notifyManager,
@@ -33,6 +34,8 @@ export function useTranslationRuntime(): boolean {
 export function useTranslationRouteStatus() {
   const { data, isSuccess, fetchStatus, isError, error, isFetching, refetch } =
     useSystemStatus();
+  // A first visit still waits for stale cached status to be verified.
+  const legacyConfirmed = useRef(false);
   let runtime: "ready" | "unavailable" | "legacy" | undefined;
 
   if (isSuccess) {
@@ -40,11 +43,15 @@ export function useTranslationRouteStatus() {
       runtime = "ready";
     } else if (data.translation_runtime_v2_unavailable === true) {
       runtime = "unavailable";
-    } else if (fetchStatus === "idle") {
-      // A refresh may invalidate a cached answer that previously allowed edits.
+    } else if (fetchStatus === "idle" || legacyConfirmed.current) {
+      // Keep admitted legacy forms mounted during background refreshes.
       runtime = "legacy";
     }
   }
+
+  useEffect(() => {
+    legacyConfirmed.current = runtime === "legacy";
+  }, [runtime]);
 
   return { runtime, isError, error, isFetching, refetch };
 }

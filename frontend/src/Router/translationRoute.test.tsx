@@ -1,5 +1,6 @@
 /* eslint-disable camelcase -- transport names. */
 import { FunctionComponent } from "react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it } from "vitest";
 import { useSystemStatus } from "@/apis/hooks/system";
@@ -14,6 +15,7 @@ import { Router, useRoutes } from "@/Router";
 import TranslationGate from "@/Router/TranslationGate";
 import type { CustomRouteObject } from "@/Router/type";
 import {
+  act,
   cleanup,
   customRender,
   fireEvent,
@@ -72,6 +74,13 @@ function showRoutes() {
     <AllProviders>
       <Routes />
     </AllProviders>,
+  );
+}
+
+function StatusFetchObserver() {
+  const { isFetching } = useSystemStatus();
+  return (
+    <span data-testid="status-fetch">{isFetching ? "fetching" : "idle"}</span>
   );
 }
 
@@ -188,7 +197,12 @@ describe("Translation addresses in the mounted application router", () => {
         HttpResponse.json({
           general: { theme: "light", setup_complete: true },
           auth: { type: "form" },
-          translator: { default_score: 50, min_source_score: 90 },
+          translator: {
+            default_score: 50,
+            min_source_score: 90,
+            translator_type: "gemini",
+            gemini_model: "gemini-saved",
+          },
         }),
       ),
       http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
@@ -213,6 +227,7 @@ describe("Translation addresses in the mounted application router", () => {
     localStorage.setItem(WHATS_NEW_SEEN_KEY, latestWhatsNewVersion);
     rawRender(
       <AllProviders>
+        <StatusFetchObserver />
         <Router />
       </AllProviders>,
     );
@@ -267,6 +282,176 @@ describe("Translation addresses in the mounted application router", () => {
       expect(
         screen.queryByRole("tab", { name: "Defaults" }),
       ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([false, undefined])(
+    "keeps a mounted legacy draft through a background status refresh when v2 is %s",
+    async (runtime) => {
+      showStatus(runtime);
+      showApplication("/settings/translator");
+      const model = await screen.findByRole("textbox", {
+        name: "Gemini model",
+      });
+      await waitFor(() => expect(model).toHaveValue("gemini-saved"));
+      const user = userEvent.setup();
+      await user.type(model, "-draft");
+      expect(
+        await screen.findByRole("button", { name: "Save 1 pending change" }),
+      ).toBeVisible();
+
+      const requested = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<void>();
+      server.use(
+        http.get("/api/system/status", async () => {
+          requested.resolve();
+          await response.promise;
+          return HttpResponse.json({
+            data:
+              runtime === undefined ? {} : { translation_runtime_v2: runtime },
+          });
+        }),
+      );
+      let refreshed: Promise<void> | undefined;
+
+      try {
+        await act(async () => {
+          refreshed = queryClient.refetchQueries({ queryKey: statusKey });
+          await requested.promise;
+        });
+        await waitFor(() =>
+          expect(screen.getByTestId("status-fetch")).toHaveTextContent(
+            "fetching",
+          ),
+        );
+
+        expect(screen.getByRole("textbox", { name: "Gemini model" })).toBe(
+          model,
+        );
+        expect(model).toHaveValue("gemini-saved-draft");
+        expect(
+          screen.getByRole("button", { name: "Save 1 pending change" }),
+        ).toBeVisible();
+
+        response.resolve();
+        await act(async () => {
+          await refreshed;
+        });
+        await waitFor(() =>
+          expect(screen.getByTestId("status-fetch")).toHaveTextContent("idle"),
+        );
+
+        expect(screen.getByRole("textbox", { name: "Gemini model" })).toBe(
+          model,
+        );
+        expect(model).toHaveValue("gemini-saved-draft");
+        expect(
+          screen.getByRole("button", { name: "Save 1 pending change" }),
+        ).toBeVisible();
+        expect(window.location.pathname).toBe("/settings/translator");
+      } finally {
+        response.resolve();
+        await refreshed;
+      }
+    },
+  );
+
+  it.each(["ready", "unavailable", "failed"] as const)(
+    "closes an admitted legacy form when its background status refresh is %s",
+    async (outcome) => {
+      showStatus(false);
+      showApplication(`/settings/translator${deepLink}`);
+      const model = await screen.findByRole("textbox", {
+        name: "Gemini model",
+      });
+      await waitFor(() => expect(model).toHaveValue("gemini-saved"));
+      const user = userEvent.setup();
+      await user.type(model, "-draft");
+      expect(
+        await screen.findByRole("button", { name: "Save 1 pending change" }),
+      ).toBeVisible();
+
+      const requested = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<void>();
+      server.use(
+        http.get("/api/system/status", async () => {
+          requested.resolve();
+          await response.promise;
+          if (outcome === "failed") {
+            return HttpResponse.json(
+              { message: "Status unavailable" },
+              { status: 503 },
+            );
+          }
+          return HttpResponse.json({
+            data:
+              outcome === "ready"
+                ? { translation_runtime_v2: true }
+                : { translation_runtime_v2_unavailable: true },
+          });
+        }),
+      );
+      let refreshed: Promise<void> | undefined;
+
+      try {
+        await act(async () => {
+          refreshed = queryClient.refetchQueries({ queryKey: statusKey });
+          await requested.promise;
+        });
+        await waitFor(() =>
+          expect(screen.getByTestId("status-fetch")).toHaveTextContent(
+            "fetching",
+          ),
+        );
+        expect(screen.getByRole("textbox", { name: "Gemini model" })).toBe(
+          model,
+        );
+        expect(model).toHaveValue("gemini-saved-draft");
+
+        response.resolve();
+        await act(async () => {
+          await refreshed;
+        });
+
+        if (outcome === "ready") {
+          expect(
+            await screen.findByRole("tab", { name: "Defaults" }),
+          ).toHaveAttribute("aria-selected", "true");
+        } else {
+          const retry = await screen.findByRole("button", {
+            name: "Try again",
+          });
+          expect(screen.getByRole("alert")).toHaveTextContent(
+            outcome === "failed"
+              ? "Bazarr+ did not answer"
+              : "Translation runtime unavailable",
+          );
+          if (outcome === "failed") {
+            expect(queryClient.getQueryData(statusKey)).toEqual({
+              translation_runtime_v2: false,
+            });
+          }
+          expect(
+            screen.queryByRole("textbox", { name: "Gemini model" }),
+          ).not.toBeInTheDocument();
+          expect(
+            screen.queryByRole("button", { name: "Save 1 pending change" }),
+          ).not.toBeInTheDocument();
+
+          showStatus(true);
+          await user.click(retry);
+          expect(
+            await screen.findByRole("tab", { name: "Defaults" }),
+          ).toHaveAttribute("aria-selected", "true");
+        }
+        expect(screen.queryByText("Translator Engine")).not.toBeInTheDocument();
+        expect(window.location.pathname).toBe("/translation");
+        expect(window.location.search).toBe("?tab=defaults&from=bookmark");
+        expect(window.location.hash).toBe("#backend-2");
+      } finally {
+        response.resolve();
+        await refreshed;
+      }
     },
   );
 
