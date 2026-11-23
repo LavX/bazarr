@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from subliminal_patch import core
 
-from app.config import settings
+from app.config import pin_subtitle_settings, settings
 from app.database import get_audio_profile_languages, get_profile_cutoff, get_profiles_list
 from constants import MAXIMUM_SUBTITLE_SIZE
 from languages.custom_lang import CustomLanguage
@@ -138,6 +138,17 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
         finally:
             CONFIG_LOCK.release()
 
+    @staticmethod
+    @contextmanager
+    def _keyed_settings_guard(shared):
+        if not shared:
+            yield
+            return
+        with pin_subtitle_settings() as pinned:
+            if not pinned:
+                raise SourcePublicationOwnersChanged('Subtitle destinations or path mappings are being saved')
+            yield
+
     def _registry_snapshot(self, target=None):
         return self._source_owner_paths(target), self._registry_rows(target)
 
@@ -180,9 +191,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             self._prepared_owners = None
             self._publication_settings = self._settings_snapshot()
             shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
-            # Local release mutations use their own advisory lock. Their ownership
-            # depends on the media directory, without any cross-library mappings.
-            pin_settings = shared or release is None
+            # Keyed mutations wait on their release before pinning shared-folder settings.
+            pin_settings = release is None
             if pin_settings:
                 with self._settings_guard():
                     self._publication_settings = self._settings_snapshot()
@@ -201,11 +211,12 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                 try:
                     options = {'release': release} if release is not None else {}
                     settings_guard = self._settings_guard() if pin_settings else nullcontext()
-                    with settings_guard, source_item_publication(source, shared=shared, **options) as (
-                            current, connection):
-                        if self._publication_settings != self._settings_snapshot():
-                            break
+                    with (settings_guard,
+                          source_item_publication(source, shared=shared, **options) as (current, connection),
+                          self._keyed_settings_guard(shared and not pin_settings)):
                         if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
+                            break
+                        if self._publication_settings != self._settings_snapshot():
                             break
                         if current is not None:
                             state = repository.item_state(current.item_id, connection)
