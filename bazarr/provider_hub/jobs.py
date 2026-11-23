@@ -125,7 +125,7 @@ def queue_uninstall(provider_id, name=None, keep_data=True):
 
 
 def queue_update(provider_id, name=None, consent=None):
-    kwargs = {"provider_id": provider_id, "name": name}
+    kwargs = {"provider_id": provider_id, "name": name, "catalog_binding": service.update_catalog_binding(provider_id)}
     if consent is not None:
         kwargs["consent"] = consent
     return _enqueue(f"Updating provider {name or provider_id}", "update_provider", kwargs)
@@ -195,7 +195,7 @@ def repair_provider(provider_id, name=None, job_id=None):
         raise JobFailed(f"Could not repair {label}: {reason_of(error)}") from error
 
 
-def update_provider(provider_id, name=None, job_id=None, consent=None):
+def update_provider(provider_id, name=None, job_id=None, consent=None, catalog_binding=None):
     label = name or provider_id
     provider = service.get_provider(provider_id, redact=False)
     if not provider:
@@ -205,7 +205,8 @@ def update_provider(provider_id, name=None, job_id=None, consent=None):
         # always been accepted and ignored.
         return service.get_provider(provider_id)
     try:
-        result = service.apply_update(provider_id, checkpoint=_checkpoint(job_id), consent_digest=consent)
+        result = service.apply_update(provider_id, checkpoint=_checkpoint(job_id), consent_digest=consent,
+                                      expected_catalog_binding=catalog_binding)
     except service.ProviderHubStopped as stopped:
         raise JobCancelled(str(stopped)) from stopped
     except Exception as error:

@@ -1033,6 +1033,23 @@ def _discard_source_entries(state: dict[str, Any], source_id: str, source_name: 
             del entries[key]
 
 
+def _detach_catalog_installations(state: dict[str, Any], source_id: str) -> None:
+    """Leave installed releases in place when their catalog registration is gone."""
+    for plugin_id, installation in (state.get("installations") or {}).items():
+        if not isinstance(installation, dict):
+            continue
+        active = _release_slots(state, plugin_id).get(releases.ACTIVE)
+        if active is not None and (active.source_id, active.origin) == (source_id, "catalog"):
+            installation["trust_note"] = _SOURCE_REMOVED_NOTE
+        if installation.get("source_bound") and installation.get("source_id") == source_id:
+            installation["source_id"] = None
+            if not _active_release_owned(state, installation, active):
+                installation["trust_note"] = _SOURCE_REMOVED_NOTE
+    for kept in (state.get("kept_data") or {}).values():
+        if isinstance(kept, dict) and kept.get("source_id") == source_id:
+            kept.update(source_id=None, origin="catalog")
+
+
 @datadir.serialized
 def add_catalog_source(
     name: str, url: str, trusted: bool = False, dev_ref: str | None = None
@@ -1077,6 +1094,8 @@ def add_catalog_source(
             if isinstance(existing, dict):
                 _discard_source_entries(state, name, existing.get("name") or name)
             sources[name] = source
+            if isinstance(existing, dict):
+                _detach_catalog_installations(state, name)
             return dict(source)
 
         source = mutate_state(store_source)
@@ -1111,22 +1130,7 @@ def remove_catalog_source(name: str) -> bool:
             # the marketplace keeps offering stale entries and update checks may
             # match them as available upgrades, which surprises the user.
             _discard_source_entries(state, name, removed_name)
-            # Its installs stay, with no source to update from. A source added
-            # later under the same name is a different catalog and must not
-            # inherit them.
-            for plugin_id, installation in (state.get("installations") or {}).items():
-                if not isinstance(installation, dict):
-                    continue
-                active = _release_slots(state, plugin_id).get(releases.ACTIVE)
-                if active is not None and (active.source_id, active.origin) == (name, "catalog"):
-                    installation["trust_note"] = _SOURCE_REMOVED_NOTE
-                if installation.get("source_bound") and installation.get("source_id") == name:
-                    installation["source_id"] = None
-                    if not _active_release_owned(state, installation, active):
-                        installation["trust_note"] = _SOURCE_REMOVED_NOTE
-            for kept in (state.get("kept_data") or {}).values():
-                if isinstance(kept, dict) and kept.get("source_id") == name:
-                    kept.update(source_id=None, origin="catalog")
+            _detach_catalog_installations(state, name)
             return True, removed_name
 
         removed, _removed_name = mutate_state(remove_source)
@@ -3897,6 +3901,7 @@ def _staged_installation(
         "staged_version": validated.version,
         "active_path": existing.get("active_path"),
         **({"active_data_key": existing["active_data_key"]} if existing.get("active_data_key") else {}),
+        **({"google_seed_rollback": existing["google_seed_rollback"]} if existing.get("google_seed_rollback") else {}),
         **({"delete_release_data": True} if existing.get("delete_release_data") else {}),
         **({"data_worker_cleanup_pending": True} if existing.get("data_worker_cleanup_pending") else {}),
         "python_path": existing.get("python_path"),
@@ -7128,11 +7133,26 @@ def update_consent(provider_id: str) -> dict[str, Any] | None:
     return _update_delta(state, provider, *update, marks=True) if update is not None else None
 
 
-def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None = None) -> dict[str, Any] | None:
+def _update_catalog_binding(state, row) -> str:
+    source_id = _bound_source_id(row)
+    return _rollback_hash((source_id, releases.catalog_registration(state, source_id)))
+
+
+def update_catalog_binding(provider_id: str) -> str:
+    """Pin a queued update to the installation's catalog registration."""
+    state = load_state()
+    row = (state.get("installations") or {}).get(provider_id)
+    return _update_catalog_binding(state, row if isinstance(row, dict) else {})
+
+
+def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None = None,
+                 *, expected_catalog_binding: str | None = None) -> dict[str, Any] | None:
     state = load_state()
     row = (state.get("installations") or {}).get(provider_id)
     if not isinstance(row, dict) or not row:
         return None
+    if expected_catalog_binding is not None and _update_catalog_binding(state, row) != expected_catalog_binding:
+        raise CatalogRegistrationChanged("the catalog registration changed while the update was waiting")
     provider = _with_origin(row, state)
     if provider.get("origin") == "local":
         # A local package is never replaced by a catalog update; ignore the request.
@@ -7156,7 +7176,7 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
             catalog_list,
             installed_kind=kind_of(provider),
         ) or (_supply_refusal(state) if source_id == OFFICIAL_CATALOG_SOURCE_ID else None) \
-            or "No update manifest is available"
+            or (provider.get("trust_note") if source_id is None else None) or "No update manifest is available"
         return _record_failed_update(provider_id, provider, message)
     entry, resolved = update
     registration = releases.catalog_registration(state, source_id)

@@ -128,7 +128,7 @@ def _slot(row, keys, with_activation):
 def _legacy_catalog_fields(document, row, manifest):
     """Keep a pre-registration community catalog binding when the saved manifest corroborates it."""
     source_id = row.get("source_id")
-    if (row.get("origin") != "catalog" or not row.get("source_bound")
+    if (row.get("origin") != "catalog" or row.get("source_bound", True) is not True
             or not isinstance(source_id, str) or source_id == "official"):
         return []
     sources = document.get("catalog_sources")
@@ -177,7 +177,11 @@ def move_state_into_releases(bind):
             slot = _slot(row, keys, with_activation)
             if slot is None:
                 continue
-            fields = slot["present"] + _legacy_catalog_fields(document, row, row.get(keys[3]))
+            catalog_fields = _legacy_catalog_fields(document, row, row.get(keys[3]))
+            if catalog_fields:
+                # v2.7.0 recorded the source URL and id before the explicit binding flag existed.
+                row.setdefault("source_bound", True)
+            fields = slot["present"] + catalog_fields
             result = bind.execute(sa.insert(releases).values(
                 plugin_id=plugin_id, version=slot["version"], state=slot_state, bundle_path=slot["bundle_path"],
                 python_path=slot["python_path"], bundle_digest=slot["bundle_digest"], env_key=None,

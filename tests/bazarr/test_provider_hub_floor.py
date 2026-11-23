@@ -1858,8 +1858,9 @@ def test_seeded_translator_update_waits_for_previous_release_data_writers(
     assert store.pointers() == selection
 
 
+@pytest.mark.parametrize("failed_update_first", [False, True])
 def test_google_rollback_survives_two_ordinary_application_startups(
-    tmp_path, monkeypatch, register_seed_translator, hub_store, google_startup,
+    tmp_path, monkeypatch, register_seed_translator, hub_store, google_startup, failed_update_first,
 ):
     import sys
 
@@ -1937,6 +1938,22 @@ def test_google_rollback_survives_two_ordinary_application_startups(
     monkeypatch.setattr("app.config.write_config", lambda: True)
     monkeypatch.setattr(settings.general, "enabled_providers", [])
     monkeypatch.setattr(settings.general, "disabled_providers", [])
+
+    if failed_update_first:
+        assert prepare_database_and_plugins(object())
+        update = inventory[0]
+        hub._stage_validated(update.manifest, True, "catalog", "official", None,
+                             catalog_list="plugins", ready_release=update)
+
+        def no_health_response(*args, **kwargs):
+            raise RuntimeError("fixture translator did not start")
+
+        with monkeypatch.context() as activation:
+            activation.setattr(get_kind(TRANSLATOR), "smoke_test", no_health_response)
+            assert hub.activate_staged_installations() == []
+        row = hub.load_state()["installations"][plugin_id]
+        assert row["active_version"] == "1.0.0" and row["state"] == "active"
+        assert not row.get("staged_version") and row["google_seed_rollback"]
 
     for _boot in range(2):
         assert prepare_database_and_plugins(object())

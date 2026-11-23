@@ -3,6 +3,7 @@
 Subtitle Hub's view of the subtitle provider kind."""
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from flask import Flask
@@ -1176,39 +1177,98 @@ def test_replacing_a_catalog_url_discards_its_unrefreshed_entries(client, commun
     assert response.status_code == 400 and "does not list" in response.json
 
 
+@pytest.mark.parametrize("when", ["unchanged", "before queue", "while queued", "after selection"])
 def test_an_authenticated_update_cannot_move_to_a_replacement_catalog_registration(
-        client, community_install_job, monkeypatch):
+        client, community_install_job, monkeypatch, when):
     from provider_hub import jobs, service, state, state_store
 
-    provider_id, _, replace_catalog, publish, _ = community_install_job
+    provider_id, source_id, _, publish, _ = community_install_job
     publish("3.0.0")
     selected = service._update_delta
+    before = state_store.list_releases(provider_id)
+    original = state.load_state()["catalog_sources"][source_id]["registration"]
+
+    def replace_catalog():
+        replacement = client.post("/api/provider-hub/catalog/sources", headers={"X-API-KEY": API_KEY}, json={
+            "name": source_id, "url": "https://github.com/example/replacement-catalog/blob/main/catalog.json",
+        })
+        assert replacement.status_code == 200
+        assert replacement.json["registration"] != original
+        publish("3.0.0")
 
     def replace_after_selection(*args, **kwargs):
         delta = selected(*args, **kwargs)
         replace_catalog()
-        publish("3.0.0")
         return delta
+
+    if when == "before queue":
+        assert service.offered_update_version(provider_id) == "3.0.0"
+        replace_catalog()
+        assert service.offered_update_version(provider_id) is None
+    elif when == "after selection":
+        monkeypatch.setattr(service, "_update_delta", replace_after_selection)
 
     queued = []
     monkeypatch.setattr(jobs, "_enqueue", lambda _label, func, args: queued.append((func, args)) or "update-job")
-    monkeypatch.setattr(service, "_update_delta", replace_after_selection)
-    before = state_store.list_releases(provider_id)
     response = client.post("/api/provider-hub/updates/apply", headers={"X-API-KEY": API_KEY},
                            json={"provider_id": provider_id})
     assert response.status_code == 202
     action, args = queued.pop()
     assert action == "update_provider"
+    if when == "unchanged":
+        updated = jobs.update_provider(**args)
+        assert updated["staged_version"] == "3.0.0"
+        assert service.activate_staged_installations() == [provider_id]
+        assert _rollback(client, plugin_id=provider_id, version="2.0.0").json == {
+            "status": "waiting", "version": "2.0.0",
+        }
+        assert service.activate_staged_installations() == [provider_id]
+        row = state.load_state()["installations"][provider_id]
+        assert row["active_version"] == "2.0.0" and row["source_id"] == source_id
+        return
+    if when == "while queued":
+        replace_catalog()
 
-    with pytest.raises(jobs.JobFailed, match="catalog registration changed"):
+    message = "Reinstall it from a catalog" if when == "before queue" else "catalog registration changed"
+    with pytest.raises(jobs.JobFailed, match=message):
         jobs.update_provider(**args)
     assert state_store.list_releases(provider_id) == before
     row = state.load_state()["installations"][provider_id]
+    assert row["source_id"] is None and row["source_bound"] is True
     assert row["active_version"] == "2.0.0" and not row.get("staged_version")
 
 
+def test_a_replaced_legacy_catalog_discards_cached_entries_until_it_has_refreshed(client, tmp_path, monkeypatch):
+    from provider_hub import jobs, state
+
+    old_url = "https://github.com/example/plugin-catalog/blob/main/catalog.json"
+    new_url = "https://github.com/example/replacement-catalog/blob/main/catalog.json"
+    plugin_id = "catalogfixture"
+    manifest = provider_manifest_v1(plugin_id)
+    manifest["source"]["catalog_url"] = old_url
+    cached = {"provider_id": plugin_id, "version": manifest["version"], "trusted": False, "manifest": manifest}
+    source = {"type": "github", "enabled": True, "official": False, "trusted": False,
+              "dev_ref": None, "last_checked_at": None, "last_error": None}
+    write_state(tmp_path / "state.json", catalog_sources={
+        "replaced": {**source, "id": "replaced", "name": "replaced", "url": new_url},
+        "unchanged": {**source, "id": "unchanged", "name": "unchanged", "url": old_url,
+                      "last_checked_at": "2026-01-01T00:00:00Z", "resolved_commit": manifest["source"]["commit"]},
+    }, catalog_entries={
+        "replaced:fixture": {**cached, "source": "replaced"},
+        "unchanged:fixture": {**cached, "source": "unchanged"},
+    })
+    assert set(state.load_state()["catalog_entries"]) == {"unchanged:fixture"}
+    queue = Mock()
+    monkeypatch.setattr(jobs, "queue_install", queue)
+    payload = {"source": "replaced", "provider_id": plugin_id, "version": manifest["version"]}
+    response = client.post("/api/provider-hub/installations", headers={"X-API-KEY": API_KEY}, json=payload)
+    assert response.status_code == 400 and "does not list" in response.json
+    queue.assert_not_called()
+
+
+@pytest.mark.parametrize("has_binding_flag", [False, True], ids=["v2.7.0", "v2.7.2"])
 def test_legacy_catalog_state_keeps_its_source_and_supports_rollback_after_the_staged_update(
-        client, rollback_store, hub_store, hub_engine, monkeypatch):  # noqa: F811
+        client, rollback_store, hub_store, hub_engine, monkeypatch, has_binding_flag):  # noqa: F811
     from migrations.versions.c3e8a1f5b972_provider_hub_releases import move_state_into_releases
     from provider_hub import releases, service, state, state_store
     from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
@@ -1237,7 +1297,8 @@ def test_legacy_catalog_state_keeps_its_source_and_supports_rollback_after_the_s
         hub_store.legacy_state_path(), catalog_sources={source_id: source},
         installations={plugin_id: {
             "provider_id": plugin_id, "name": "Provider", "state": "staged", "pending_restart": True,
-            "source_id": source_id, "source_bound": True, "origin": "catalog", "trusted": False,
+            "source_id": source_id, "origin": "catalog", "trusted": False,
+            **({"source_bound": True} if has_binding_flag else {}),
             "active_version": previous["version"], "active_path": bundles[0], "python_path": interpreters[0],
             "manifest": previous, "staged_version": staged["version"], "staged_path": bundles[1],
             "staged_python_path": interpreters[1], "staged_manifest": staged, "config": {"region": "eu"},
@@ -1249,6 +1310,7 @@ def test_legacy_catalog_state_keeps_its_source_and_supports_rollback_after_the_s
     hub_store.ensure_ready()
     with hub_store.write_transaction(hub_engine) as connection:
         assert move_state_into_releases(connection) == 2
+    assert state.load_state()["installations"][plugin_id]["source_bound"] is True
     assert service.activate_staged_installations() == [plugin_id]
     active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     retained, = state_store.list_releases(plugin_id, states=(releases.RETIRED,))
