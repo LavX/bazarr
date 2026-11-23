@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 import requests
 
+import provider_hub_state_engines as state_engines
 from provider_hub import signing_roots as _signing_roots
+
+hub_engine = state_engines.hub_engine
+hub_store = state_engines.hub_store
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILDER = ROOT / "scripts" / "release" / "catalog_floor.py"
@@ -1761,11 +1765,13 @@ def test_google_startup_and_worker_reject_a_config_release_before_ranking_it(
 
 
 def test_seeded_translator_update_waits_for_previous_release_data_writers(
-    tmp_path, monkeypatch, keys, register_seed_translator, hub, google_startup,
+    tmp_path, monkeypatch, keys, register_seed_translator, hub_store, google_startup,
 ):
-    from provider_hub import datadir, seed
+    from provider_hub import datadir, releases, seed, service as hub, state
+    from provider_hub.kinds import TRANSLATOR, get_kind
 
     plugin_id = seed.GOOGLE_PLUGIN_ID
+    monkeypatch.setattr(state, "state_file", hub_store.legacy_state_path)
     root = hub.provider_hub_dir()
     _no_network(monkeypatch, hub)
     _build_runtime_snapshot(tmp_path / "old-image", monkeypatch, keys, google_fields={"permissions": ["data_dir"]})
@@ -1783,6 +1789,15 @@ def test_seeded_translator_update_waits_for_previous_release_data_writers(
     listdir = os.listdir
     old_stat = old_data.stat()
     renamed = old_file.with_name("renamed.txt")
+    smoke_calls = []
+    kind = get_kind(TRANSLATOR)
+    smoke_test = kind.smoke_test
+
+    def smoke_final_data(manifest, bundle, interpreter, *, data_dir, timeout=None):
+        smoke_calls.append((manifest.version, data_dir, (data_dir / renamed.name).read_text()))
+        return smoke_test(manifest, bundle, interpreter, data_dir=data_dir, timeout=timeout)
+
+    monkeypatch.setattr(kind, "smoke_test", smoke_final_data)
 
     def list_while_previous_worker_writes(directory):
         names = listdir(directory)
@@ -1796,22 +1811,49 @@ def test_seeded_translator_update_waits_for_previous_release_data_writers(
     with monkeypatch.context() as race:
         race.setattr(datadir.os, "listdir", list_while_previous_worker_writes)
         assert not start()
+        staged_release, = hub_store.list_releases(plugin_id, states=(releases.STAGED,))
         assert hub.activate_staged_installations() == []
+        assert hub_store.list_releases(plugin_id, states=(releases.STAGED,)) == [staged_release]
 
     staged = hub.load_state()["installations"][plugin_id]
     assert staged["active_version"] == "1.0.0" and staged["staged_version"] == "1.1.0"
     assert staged["active_data_key"] == old_data.name
     assert staged["data_worker_cleanup_pending"] is True
-    assert not staged.get("staged_data_key")
+    assert not smoke_calls
+    assert "staged_data_fingerprint" not in staged
+    assert staged_release.data_key and staged_release.data_key != old_data.name
+    staged_data = datadir.release_path(root, plugin_id, staged_release.data_key)
+    assert not staged_data.exists()
 
     old_file.rename(renamed)
     renamed.write_text("final write")
     monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: True)
+    # A replacement row must be detectable even when SQLite reuses its numeric ID.
+    monkeypatch.setattr(releases, "now_text", lambda: "2099-01-01T00:00:00Z")
+    apply_plan = releases.apply_plan
+
+    def reject_promotion(connection, plan):
+        apply_plan(connection, plan)
+        if any(row_id == staged_release.id and fields.get("state") == releases.ACTIVE
+               for row_id, fields, _ in plan.updates):
+            raise RuntimeError("fixture interrupted the promotion")
+
+    with monkeypatch.context() as database:
+        database.setattr(releases, "apply_plan", reject_promotion)
+        assert hub.activate_staged_installations() == []
+    assert hub_store.list_releases(plugin_id, states=(releases.STAGED,)) == [staged_release]
+    assert smoke_calls == [("1.1.0", staged_data, "final write")]
+    (staged_data / renamed.name).write_text("left by the interrupted attempt")
+
     assert hub.activate_staged_installations() == [plugin_id]
+    active_release, = hub_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (active_release.id, active_release.created_at) == (staged_release.id, staged_release.created_at)
+    assert active_release.data_key == staged_release.data_key == staged["staged_data_key"]
     active = hub.load_state()["installations"][plugin_id]
     assert active["active_version"] == "1.1.0" and Path(active["active_path"]).is_relative_to(new_image)
     current_data = datadir.release_path(root, plugin_id, active["active_data_key"])
-    assert current_data != old_data
+    assert current_data == staged_data
+    assert smoke_calls == [("1.1.0", current_data, "final write")] * 2
     assert (current_data / renamed.name).read_text() == "final write"
     assert store.pointers() == selection
 
@@ -1974,7 +2016,7 @@ def test_refused_first_activation_preserves_owner_settings_for_a_retired_provide
     assert getattr(settings, provider_id) == saved_section and provider_id not in removed
 
 
-@pytest.mark.parametrize("boot", ["same", "next"])
+@pytest.mark.parametrize("boot", ["same", "next", "same-with-choice"])
 def test_deferred_google_activation_finishes_default_selection_on_that_boot(
     boot, tmp_path, monkeypatch, keys, register_seed_translator, hub, google_startup,
 ):
@@ -2005,12 +2047,15 @@ def test_deferred_google_activation_finishes_default_selection_on_that_boot(
     monkeypatch.setattr(settings.general, "enabled_providers", [])
     monkeypatch.setattr(settings.general, "disabled_providers", [])
     real_start = hub_startup.start_after_migrations
+    other_engine = store.create_instance("example_engine") if boot == "same-with-choice" else None
 
     def finish_boot():
+        if other_engine is not None:
+            store.set_engine(other_engine.id)
         workers_ready[0] = True
         return real_start()
 
-    if boot == "same":
+    if boot != "next":
         monkeypatch.setattr(hub_startup, "start_after_migrations", finish_boot)
     else:
         # The first full boot stays deferred, with no migration marker or pointer.
@@ -2024,5 +2069,9 @@ def test_deferred_google_activation_finishes_default_selection_on_that_boot(
     assert active["state"] == "active" and active["active_version"] == "1.1.0"
     assert Path(active["active_path"]).is_relative_to(new_image)
     google, = store.list_instances("google_translate")
-    assert store.pointers() == (google.id, None)
-    assert hub.load_state()["google_seed_selected"] is True
+    if other_engine is None:
+        assert store.pointers() == (google.id, None)
+        assert hub.load_state()["google_seed_selected"] is True
+    else:
+        assert store.pointers() == (other_engine.id, None)
+        assert "google_seed_selected" not in hub.load_state()

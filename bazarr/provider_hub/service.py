@@ -4005,8 +4005,9 @@ def _stage_validated(
                 data_from_active = source is not None and source == _active_data_path(
                     validated.provider_id, existing or {})
                 data_deferred = defer_active_data_copy and data_from_active
+                # The key is part of the stored release's identity even when boot must wait to copy its data.
+                data_key = uuid.uuid4().hex
                 if not data_deferred:
-                    data_key = uuid.uuid4().hex
                     data_path = datadir.release_path(provider_hub_dir(), validated.provider_id, data_key)
                     data_fingerprint = datadir.copy_folder(source, data_path)
             if not data_deferred:
@@ -4074,9 +4075,9 @@ def _stage_validated(
             )
             if data_key:
                 installation["staged_data_key"] = data_key
-                installation["staged_data_fingerprint"] = data_fingerprint
-            if data_key or data_deferred:
                 installation["staged_data_from_active"] = data_from_active
+                if not data_deferred:
+                    installation["staged_data_fingerprint"] = data_fingerprint
             plugin = parse_plugin_manifest(validated.raw) if validated.raw.get("schema_version") == 2 else None
             if plugin is not None:
                 # Which installed plugin supplies each capability it needs, kept with the release.
@@ -5236,7 +5237,10 @@ def _prepare_activation_data(plugin_id, row, active_data, files) -> tuple[str | 
         # staged release or one restored from backup can also lack the folder.
         carry_active = row.get("staged_data_from_active", True) and not row.get("delete_release_data")
         datadir.copy_folder(active_data if carry_active else None, path)
-    elif row.get("staged_data_from_active") and datadir.fingerprint(active_data) != row.get("staged_data_fingerprint"):
+    elif row.get("staged_data_from_active") and (
+            "staged_data_fingerprint" not in row
+            or datadir.fingerprint(active_data) != row["staged_data_fingerprint"]):
+        # A deferred stage has no fingerprint. Recopy on retry even if the previous attempt made the folder.
         datadir.copy_folder(active_data, path)
     return key, path
 
