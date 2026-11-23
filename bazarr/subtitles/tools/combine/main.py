@@ -193,8 +193,9 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                         if subtitle_source_version(video_path) != video_version:
                             raise ValueError('The source media file changed during composition')
                         publication_proof, alternates, alternate_proof = prepared
-                        if (not all(local_subtitle_owner_is_clear(video_path, path, owners) for path in inputs)
-                                or not owners.registered_ownership_is_current(publication_proof)):
+                        if not all(local_subtitle_owner_is_clear(video_path, path, owners) for path in inputs):
+                            raise ValueError('A combined subtitle input lost its unique owner before publication')
+                        if not owners.registered_ownership_is_current(publication_proof):
                             raise ValueError('A combined subtitle input or destination lost its unique owner')
                         yield
                         _retire_source_alternates(video_path, alternates, owners, notify,

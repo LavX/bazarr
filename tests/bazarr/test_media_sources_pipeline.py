@@ -3809,7 +3809,7 @@ def test_source_combine_rechecks_local_input_ownership_after_preparation(
         assert str(primary if language == 'en' else secondary) not in consumed
     else:
         assert ('input lost its unique owner before publication' in result.error
-                or 'Another video now owns the subtitle destination' in result.error)
+                or 'Another video now owns a subtitle destination' in result.error)
     for path in (primary, secondary, destination, alternate, variant):
         assert path.read_bytes() == CONTENT
     assert world.db.execute(sa.select(repository.History)).all() == []
