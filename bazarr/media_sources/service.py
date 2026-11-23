@@ -423,7 +423,9 @@ def queue_search(item_id):
 
 def source_upgrade_item_stamp(item_id):
     item = repository.get_item(item_id)
-    return (item.source_id, item.library_id, item.created_at.isoformat(), item.path) if item is not None else None
+    if item is None:
+        return None
+    return item.source_id, item.library_id, item.created_at.isoformat(), item.path, local_content_stamp(item.path)
 
 
 def queue_source_upgrade(item_id, history_id=None):
@@ -434,6 +436,8 @@ def queue_source_upgrade(item_id, history_id=None):
     expected_item = source_upgrade_item_stamp(item_id)
     if expected_item is None:
         raise SourceError('No such item', 404, 'not_found')
+    if expected_item[-1] is None:
+        raise SourceError('The source video is unavailable.', 409, 'not_upgradable')
     reason = item_disabled_reason(item_id)
     if reason:
         raise SourceError(reason, 409, 'disabled')
