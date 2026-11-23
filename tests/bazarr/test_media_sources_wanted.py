@@ -817,7 +817,7 @@ def test_runtime_keeps_manual_and_wanted_translation_reservations_separate(world
 
 @pytest.mark.parametrize('change', [
     'translator unavailable', 'arr claimed', 'arr claimed during translation', 'arr claimed after preparation',
-    'mapped input owner changed', 'mapped destination owner changed', 'published',
+    'mapped input owner changed', 'mapped destination owner changed', 'mapped generated owner changed', 'published',
 ])
 def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, isolated_jobs, monkeypatch, change):
     from app.config import settings
@@ -837,7 +837,7 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
     ]
     world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
     update_profile_id_list.invalidate()
-    mapped_owner = change in ('mapped input owner changed', 'mapped destination owner changed')
+    mapped_owner = change.startswith('mapped ')
     if mapped_owner:
         monkeypatch.setattr(settings.general, 'subfolder', 'relative')
         monkeypatch.setattr(settings.general, 'subfolder_custom', '../Subs')
@@ -868,6 +868,11 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
     input_version = subtitle_source_version(original)
     generated = folder / 'Film.hu.ffsubsync.srt'
     generated.write_bytes(pipeline.CONTENT)
+    if change == 'mapped generated owner changed':
+        owned_generated = folder / 'Film.hu.alass.srt'
+        changed_generated = folder / 'Film.hu.autosubsync.srt'
+        owned_generated.write_bytes(pipeline.CONTENT)
+        changed_generated.write_bytes(pipeline.CONTENT)
     cleanup = Mock(wraps=indexer.quarantine_sync_outputs_after_mutation)
     monkeypatch.setattr(indexer, 'quarantine_sync_outputs_after_mutation', cleanup)
 
@@ -912,7 +917,11 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
 
             def change_alias_at_publication(source, **kwargs):
                 alias.unlink()
-                collision = 'Film.hu.mkv' if change == 'mapped destination owner changed' else 'Film.en.mkv'
+                collision = {
+                    'mapped input owner changed': 'Film.en.mkv',
+                    'mapped destination owner changed': 'Film.hu.mkv',
+                    'mapped generated owner changed': 'Film.hu.ffsubsync.mkv',
+                }[change]
                 alias.symlink_to(video(world.tmp_path / 'Relocated' / collision))
                 owners = indexer.SourcePublicationOwnerIndex()
                 assert owners._registry_snapshot() == registry
@@ -920,6 +929,12 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
                 if change == 'mapped destination owner changed':
                     assert sync_output_owner_is_unique(context.path, original, owners)
                     assert not sync_output_owner_is_unique(context.path, destination, owners)
+                elif change == 'mapped generated owner changed':
+                    assert sync_output_owner_is_unique(context.path, original, owners)
+                    assert sync_output_owner_is_unique(context.path, destination, owners)
+                    assert not sync_output_owner_is_unique(context.path, generated, owners)
+                    assert sync_output_owner_is_unique(context.path, owned_generated, owners)
+                    changed_generated.write_bytes(b'Edited after cleanup was planned')
                 return publication(source, **kwargs)
 
             monkeypatch.setattr(indexer, 'source_item_publication', change_alias_at_publication)
@@ -932,11 +947,16 @@ def test_translation_after_a_wanted_download_keeps_its_publication_scope(world, 
         engine.assert_not_called()
     assert original.read_bytes() == pipeline.CONTENT
     actions = world.db.execute(sa.select(repository.History.c.action).order_by(repository.History.c.id)).scalars().all()
-    if change == 'published':
+    if change in ('published', 'mapped generated owner changed'):
         assert b'Translated cue' in destination.read_bytes()
         assert actions == [1, 6]
         cleanup.assert_called_once()
-        assert not generated.exists()
+        if change == 'mapped generated owner changed':
+            assert generated.read_bytes() == pipeline.CONTENT
+            assert changed_generated.read_bytes() == b'Edited after cleanup was planned'
+            assert not owned_generated.exists()
+        else:
+            assert not generated.exists()
         assert not isolated_jobs.jobs_pending_queue
         return
 

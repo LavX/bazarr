@@ -282,11 +282,13 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             if shared and self._prepared_owners is None:
                 raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
             paths = (destination,) if destination is not None else ()
-            proof = None
+            output_paths = tuple(path for path, _ in outputs)
             if recheck_registered:
-                paths += tuple(path for path, _ in outputs)
-                if shared and paths:
-                    proof = self.prepare_registered_ownership(source.path, paths)
+                paths += output_paths
+            # A planned sibling still needs its own registered proof at retirement.
+            registered_paths = paths if recheck_registered else output_paths
+            proof = (self.prepare_registered_ownership(source.path, registered_paths)
+                     if shared and registered_paths else None)
             # A scanner with the conflicting lock finishes outside this transaction.
             # Retrying after rollback leaves it free to finish any remaining row writes.
             for delay in (0, 0.025, 0.05, 0.10, 0.20, 0.40, 0.40):
@@ -306,7 +308,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                                     or not os.path.isfile(current.path)):
                                 current = None
                         if current is not None and paths:
-                            self.require_current_ownership(current.path, paths, proof)
+                            self.require_current_ownership(current.path, paths, proof if recheck_registered else None)
                         publishing = True
                         yield current, connection, prepared
                         if current is not None and outputs:
