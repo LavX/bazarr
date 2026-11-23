@@ -88,7 +88,7 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     [titleKey]: "Retained folder title",
   };
 
-  function mockExclusions() {
+  function mockExclusions(conflict = false) {
     const gets = vi.fn();
     const deletes = vi.fn();
     let rows = [arr, source, removed, retained];
@@ -169,6 +169,22 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
             ? rows.filter((row) => !keys.includes(row.source_key))
             : [];
         } else if (params.has("source_blacklist_id")) {
+          if (conflict) {
+            conflict = false;
+            rows = rows.map((row) =>
+              row === source
+                ? {
+                    ...row,
+                    [titleKey]: "Updated exclusion",
+                    removal_key: "updated-key",
+                  }
+                : row,
+            );
+            return HttpResponse.json(
+              { message: "The exclusion has changed." },
+              { status: 409 },
+            );
+          }
           rows = rows.filter(
             (row) =>
               row.origin !== "source" ||
@@ -333,6 +349,33 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     await user.click(screen.getByRole("button", { name: "Remove All" }));
     await expectDelete({ all: "true", sources: "1" });
     expect(await screen.findByText(empty)).toBeInTheDocument();
+  });
+
+  it("refreshes a stale exclusion and uses the new removal key", async () => {
+    const user = userEvent.setup();
+    const { expectDelete } = mockExclusions(true);
+    customRender(<View />);
+    const stale = await screen.findByRole("row", { name: /Folder title/ });
+    await user.click(
+      within(stale).getByRole("button", { name: "Remove from Excluded" }),
+    );
+    expect(await screen.findByText("Exclusion changed")).toBeInTheDocument();
+    const current = await screen.findByRole("row", {
+      name: /Updated exclusion/,
+    });
+    expect(screen.queryByText("Folder title")).not.toBeInTheDocument();
+    await user.click(
+      within(current).getByRole("button", { name: "Remove from Excluded" }),
+    );
+    await expectDelete({
+      sources: "1",
+      source_blacklist_id: "81",
+      source_blacklist_key: "updated-key",
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("Updated exclusion")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Arr title")).toBeInTheDocument();
   });
 
   it("deletes by source blacklist id and preserves the Arr deletion form", async () => {

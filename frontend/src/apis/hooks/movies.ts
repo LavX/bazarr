@@ -9,6 +9,7 @@ import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { useDeleteBlacklistMutation } from "./blacklistMutations";
 
 const cacheMovies = (client: QueryClient, movies: Item.Movie[]) => {
   movies.forEach((item) => {
@@ -153,18 +154,10 @@ export function useMovieAddBlacklist() {
 }
 
 export function useMovieDeleteBlacklist() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationKey: [QueryKeys.Movies, QueryKeys.Blacklist],
-
-    mutationFn: (removal: Blacklist.Removal) =>
-      api.movies.deleteBlacklist(removal),
-
-    onSuccess: () =>
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, QueryKeys.Blacklist],
-      }),
-  });
+  return useDeleteBlacklistMutation(
+    [QueryKeys.Movies, QueryKeys.Blacklist],
+    (removal) => api.movies.deleteBlacklist(removal),
+  );
 }
 
 export function useMovieHistoryPagination(includeEmbedded = false) {

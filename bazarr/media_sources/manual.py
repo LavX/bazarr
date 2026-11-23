@@ -88,7 +88,7 @@ def download_source_subtitle(source, provider, subtitle, hi, forced, original_fo
 
 
 @contextmanager
-def manual_source_publication(source, destination, ownership_index):
+def manual_source_publication(source, destination, ownership_index, *, release=None):
     def prepare():
         video_directory = os.path.dirname(source.path)
         custom_directory = get_target_folder(source.path, create=False)
@@ -99,7 +99,8 @@ def manual_source_publication(source, destination, ownership_index):
         if not sync_output_owner_is_unique(source.path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The subtitle destination does not have one media owner')
 
-    with ownership_index.publication(source, prepare, destination=destination) as (current, connection, _):
+    with ownership_index.publication(source, prepare, destination=destination, release=release) as (
+            current, connection, _):
         state = repository.item_state(current.item_id, connection) if current is not None else None
         if state is None or state.server_missing:
             raise SubtitleDestinationChanged('The source item is no longer available')
@@ -114,12 +115,13 @@ def manual_source_publication(source, destination, ownership_index):
 
 def write_source_subtitle(source, destination, content, *, written_paths, on_publish, candidate=None):
     ownership_index = SourcePublicationOwnerIndex()
+    release = None if candidate is None else (source.kind, candidate.subtitle.provider_name, candidate.subtitle.id)
 
     @contextmanager
     def publication():
-        with manual_source_publication(source, destination, ownership_index) as (current, connection):
+        with manual_source_publication(source, destination, ownership_index, release=release) as (current, connection):
             if candidate is not None:
-                # Exclusion uses the same publication lock and commits before a waiting writer proceeds.
+                # Read after any exclusion of this release, including one from a different item.
                 validate_source_candidate(candidate, current, candidate.subtitle.provider_name, target=connection)
             yield
 
