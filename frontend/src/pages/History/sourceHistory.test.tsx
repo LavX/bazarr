@@ -616,10 +616,10 @@ describe.each(cases)(
       const source = screen.getByRole("row", { name: /Archive item/ });
       expect(
         within(arr).getByRole("link", { name: "Original entry" }),
-      ).toHaveAttribute("href", "#history-arr-7");
+      ).toHaveAttribute("href", "/#history-arr-7");
       expect(
         within(source).getByRole("link", { name: "Original entry" }),
-      ).toHaveAttribute("href", "#history-source-7");
+      ).toHaveAttribute("href", "/#history-source-7");
 
       for (const origin of ["Source", "Arr"]) {
         const row = screen.getByRole("row", {

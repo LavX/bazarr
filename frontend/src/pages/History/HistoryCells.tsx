@@ -1,3 +1,4 @@
+import { Link, useLocation } from "react-router";
 import {
   ActionIcon,
   Anchor,
@@ -31,7 +32,7 @@ export function historyAnchors(rows: HistoryRow[]) {
 
 export function HistoryAction({ row }: { row: HistoryRow }) {
   return (
-    <span id={row.origin ? historyAnchor(row) : undefined}>
+    <span id={row.origin ? historyAnchor(row) : undefined} tabIndex={-1}>
       <HistoryIcon action={row.action} />
     </span>
   );
@@ -73,6 +74,7 @@ export function HistoryUpgrade({
   row: HistoryRow;
   anchors: ReturnType<typeof historyAnchors>;
 }) {
+  const location = useLocation();
   const original = row.original;
   const verified =
     original &&
@@ -95,7 +97,31 @@ export function HistoryUpgrade({
       )}
       {verified &&
         (onPage ? (
-          <Anchor href={`#${target}`} size="xs">
+          <Anchor
+            component={Link}
+            to={{
+              pathname: location.pathname,
+              search: location.search,
+              hash: `#${target}`,
+            }}
+            size="xs"
+            onClick={(event) => {
+              if (
+                event.button !== 0 ||
+                event.altKey ||
+                event.ctrlKey ||
+                event.metaKey ||
+                event.shiftKey
+              ) {
+                return;
+              }
+              event.preventDefault();
+              const anchor =
+                event.currentTarget.ownerDocument.getElementById(target);
+              anchor?.scrollIntoView({ block: "center" });
+              anchor?.focus({ preventScroll: true });
+            }}
+          >
             Original entry
           </Anchor>
         ) : (
