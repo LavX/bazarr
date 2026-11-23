@@ -10,7 +10,7 @@ from subtitles.tools.subsync_engines import (capture_subtitle_versions, local_su
                                              plan_sync_output_cleanup, quarantine_sync_outputs_after_mutation,
                                              read_regular_subtitle,
                                              regular_subtitle_version, staged_subtitle_write,
-                                             subtitle_mutation, sync_output_owner_is_unique)
+                                             subtitle_mutation, subtitle_source_version, sync_output_owner_is_unique)
 from app.jobs_queue import JobCancelled
 from media_servers.events import publication_callback
 from sportarr.connection import check_cancelled
@@ -51,6 +51,9 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             from media_sources.indexer import SourcePublicationOwnerIndex
             if sports_operation is not None or arr_instance_id is not None:
                 raise ValueError('A source composition requires source media metadata')
+            video_version = subtitle_source_version(video_path)
+            if video_version is None:
+                return CombineResult(status="skipped", reason="source media file is missing or unavailable")
             owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
 
         if media_type == 'sports' and source is None:
@@ -179,6 +182,8 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                             current, _, alternates):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
+                        if subtitle_source_version(video_path) != video_version:
+                            raise ValueError('The source media file changed during composition')
                         # The prepared registry owners are pinned here. Recheck
                         # media-folder videos for inputs in either subtitle folder.
                         if any(not sync_output_owner_is_unique(video_path, path, owners) for path in inputs):

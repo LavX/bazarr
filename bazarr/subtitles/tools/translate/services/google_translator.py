@@ -29,7 +29,7 @@ class GoogleTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
                  radarr_id, arr_instance_id=None, sports_operation=None, cancel=None,
-                 expected_destination_versions=(), source=None):
+                 expected_destination_versions=(), source=None, source_video_version=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -48,6 +48,7 @@ class GoogleTranslatorService:
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
         self.source = source
+        self.source_video_version = source_video_version
         self.cancel = cancel
         # The destination's versions as the queueing sighting found them; an
         # empty tuple means this translation was not queued by an auto path and
