@@ -235,12 +235,12 @@ function arrSearchResults(results: ItemSearchResult[]): ItemSearchResult[] {
 
 export function useServerSearch(query: string, enabled: boolean) {
   const { data: settings } = useSystemSettings();
+  const includeSources = settings?.media_sources?.visible === true;
   return useQuery({
-    queryKey: [QueryKeys.System, QueryKeys.Search, query],
-    queryFn: () => api.system.search(query),
+    queryKey: [QueryKeys.System, QueryKeys.Search, query, includeSources],
+    queryFn: () => api.system.search(query, includeSources),
     enabled,
-    select:
-      settings?.media_sources?.visible === false ? arrSearchResults : undefined,
+    select: includeSources ? undefined : arrSearchResults,
   });
 }
 

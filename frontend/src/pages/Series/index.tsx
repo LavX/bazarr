@@ -93,13 +93,13 @@ const SeriesView: FunctionComponent = () => {
     [],
   );
 
-  // A series with no language profile, or with no episode files, has nothing to
-  // complete, so it is untracked and belongs to neither group. Otherwise it is
-  // complete when no episode is missing.
   const subtitlesStatus = useCallback(
     (series: LibraryRow<Item.Series>): SubtitlesStatus => {
-      if (series.profileId == null || series.episodeFileCount === 0)
-        return "untracked";
+      if (series.episodeFileCount === 0) return "untracked";
+      // Source episodes can have their own profiles when the group has none.
+      if (series.origin === "source" && series.episodeMissingCount > 0)
+        return "missing";
+      if (series.profileId == null) return "untracked";
       return series.episodeMissingCount === 0 ? "complete" : "missing";
     },
     [],
@@ -497,15 +497,6 @@ const SeriesView: FunctionComponent = () => {
   const selectionToolbar = useMemo(() => {
     if (selections.length === 0) return undefined;
     const sourceRows = selections.filter((item) => item.origin === "source");
-    if (sourceRows.length === selections.length)
-      return (
-        <LibrarySourceSelectionActions
-          kind="series"
-          rows={sourceRows}
-          canUseLibrary={canUseSourceLibrary}
-        />
-      );
-    if (sourceRows.length > 0) return undefined;
     const arrRows = selections.filter((item) => item.origin !== "source");
 
     const toBatchItems = (): BatchItem[] =>
@@ -514,6 +505,16 @@ const SeriesView: FunctionComponent = () => {
         sonarrSeriesId: s.sonarrSeriesId,
         arr_instance_id: s.arr_instance_id ?? undefined,
       }));
+
+    if (sourceRows.length > 0)
+      return (
+        <LibrarySourceSelectionActions
+          kind="series"
+          rows={sourceRows}
+          arrItems={toBatchItems()}
+          canUseLibrary={canUseSourceLibrary}
+        />
+      );
 
     const toWantedItems = (): WantedItem[] =>
       arrRows.map((s) => ({

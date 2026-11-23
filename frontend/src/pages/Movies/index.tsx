@@ -466,15 +466,6 @@ const MovieView: FunctionComponent = () => {
   const selectionToolbar = useMemo(() => {
     if (selections.length === 0) return undefined;
     const sourceRows = selections.filter((item) => item.origin === "source");
-    if (sourceRows.length === selections.length)
-      return (
-        <LibrarySourceSelectionActions
-          kind="movies"
-          rows={sourceRows}
-          canUseLibrary={canUseSourceLibrary}
-        />
-      );
-    if (sourceRows.length > 0) return undefined;
     const arrRows = selections.filter((item) => item.origin !== "source");
 
     const toBatchItems = (): BatchItem[] =>
@@ -483,6 +474,16 @@ const MovieView: FunctionComponent = () => {
         radarrId: m.radarrId,
         arr_instance_id: m.arr_instance_id ?? undefined,
       }));
+
+    if (sourceRows.length > 0)
+      return (
+        <LibrarySourceSelectionActions
+          kind="movies"
+          rows={sourceRows}
+          arrItems={toBatchItems()}
+          canUseLibrary={canUseSourceLibrary}
+        />
+      );
 
     const toWantedItems = (): WantedItem[] =>
       arrRows.map((m) => ({

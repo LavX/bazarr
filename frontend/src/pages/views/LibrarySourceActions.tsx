@@ -10,9 +10,11 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
+import { useBatchAction } from "@/apis/hooks/subtitles";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { libraryItemPath, LibraryKind } from "@/apis/raw/library";
+import type { BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
 import { useModals } from "@/modules/modals";
 import { sourceDetailApi, sourceDetailKeys } from "@/pages/SourceDetail/api";
@@ -184,29 +186,44 @@ export function LibrarySourceRowActions({
 export function LibrarySourceSelectionActions({
   kind,
   rows,
+  arrItems,
   canUseLibrary,
 }: {
   kind: LibraryKind;
   rows: SourceActionRow[];
+  arrItems: BatchItem[];
   canUseLibrary: CanUseLibrary;
 }) {
-  const action = useLibrarySourceAction(kind);
+  const sourceAction = useLibrarySourceAction(kind);
+  const arrAction = useBatchAction();
   const active = rows.every(canUseLibrary);
+  const pending = sourceAction.isPending || arrAction.isPending;
+
+  function run(action: SourceAction) {
+    sourceAction.mutate({ action, rows });
+    if (arrItems.length > 0) {
+      arrAction.mutate({
+        action: action === "search" ? "search-missing" : "scan-disk",
+        items: arrItems,
+      });
+    }
+  }
+
   return (
     <Group gap="xs">
       <Toolbox.Button
         icon={faMagnifyingGlass}
         disabled={!active || !rows.every((row) => canSearch(row, kind))}
-        loading={action.isPending}
-        onClick={() => action.mutate({ action: "search", rows })}
+        loading={pending}
+        onClick={() => run("search")}
       >
         Search Missing
       </Toolbox.Button>
       <Toolbox.Button
         icon={faHardDrive}
         disabled={!active}
-        loading={action.isPending}
-        onClick={() => action.mutate({ action: "scan", rows })}
+        loading={pending}
+        onClick={() => run("scan")}
       >
         Scan Disk
       </Toolbox.Button>

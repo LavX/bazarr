@@ -248,10 +248,10 @@ class SystemApi extends BaseApi {
     return response.data;
   }
 
-  async search(query: string) {
+  async search(query: string, includeSources = false) {
     const response = await this.get<ItemSearchResult[]>("/searches", {
       query,
-      sources: 1,
+      sources: includeSources ? 1 : undefined,
     });
     return response;
   }

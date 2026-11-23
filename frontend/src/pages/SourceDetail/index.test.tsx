@@ -32,6 +32,7 @@ const movie = {
   season: null,
   episode: null,
   arr_shadow: false,
+  audio_language: ["English", "Japanese"],
   subtitles: [
     ["en:hi", "/media/movie.en.hi.srt", 60],
     ["de", null, null, "pgs"],
@@ -103,6 +104,8 @@ it("reads the source movie despite a colliding Arr cache and normalizes its stor
   ).toBeVisible();
   expect(screen.queryByText("Wrong Arr movie")).not.toBeInTheDocument();
   expect(screen.queryByText("Wrong source episode")).not.toBeInTheDocument();
+  expect(screen.getByText("English", { exact: true })).toBeVisible();
+  expect(screen.getByText("Japanese", { exact: true })).toBeVisible();
   expect(screen.getByText("movie.en.hi.srt")).toBeVisible();
   expect(screen.getByText("en:HI")).toBeVisible();
   expect(screen.getByText("hu:Forced")).toBeVisible();

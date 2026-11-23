@@ -33,7 +33,7 @@ import SourceBadge from "@/components/bazarr/SourceBadge";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { useModals, withModal } from "@/modules/modals";
-import ItemOverview from "@/pages/views/ItemOverview";
+import ItemOverview, { OverviewItem } from "@/pages/views/ItemOverview";
 import { basename } from "@/utilities/files";
 import {
   sourceDetailApi,
@@ -54,7 +54,7 @@ import {
   SourceUploadModal,
 } from "./forms";
 
-function asOverview(item: SourceGroup | SourceItem): Item.Base {
+function asOverview(item: SourceGroup | SourceItem): OverviewItem {
   return {
     title: item.title,
     year: item.year ?? "",

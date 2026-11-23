@@ -43,6 +43,7 @@ describe.each([
       attention = true,
       visible = true,
       enabled = true,
+      episodeProfileOnly = false,
     } = {}) {
       const folder = {
         ...unavailable,
@@ -69,6 +70,7 @@ describe.each([
         source_id: sourceId,
         library_id: libraryId,
         source_name: "Archive",
+        profileId: episodeProfileOnly ? null : arrRow.profileId,
         identity_state: attention ? "unmatched" : "identified",
         shadowed_by: null,
         needs_attention: attention,
@@ -77,6 +79,7 @@ describe.each([
       const list = vi.fn();
       const saveArr = vi.fn();
       const saveSource = vi.fn();
+      const batchArr = vi.fn();
       const searchSource = vi.fn();
       const scanSource = vi.fn();
       server.use(
@@ -153,6 +156,10 @@ describe.each([
           saveSource(await request.json());
           return HttpResponse.json({ id });
         }),
+        http.post("/api/subtitles/batch", async ({ request }) => {
+          batchArr(await request.json());
+          return HttpResponse.json({ queued: 1, skipped: 0, errors: [] });
+        }),
         http.post(`/api/sources/${detailKind}/${id}/search`, () => {
           searchSource();
           return HttpResponse.json({ job_id: null }, { status: 202 });
@@ -165,7 +172,7 @@ describe.each([
           },
         ),
       );
-      return { list, saveArr, saveSource, searchSource, scanSource };
+      return { list, saveArr, saveSource, batchArr, searchSource, scanSource };
     }
 
     it("shows distinct links, leaves the numeric detail cache Arr-owned, and scopes mass profile writes", async () => {
@@ -259,6 +266,59 @@ describe.each([
       expect(
         screen.getByRole("checkbox", { name: "Needs attention" }),
       ).not.toBeChecked();
+    });
+
+    if (kind === "series") {
+      it("includes a show with episode-level missing subtitles in the Missing filter", async () => {
+        setup({ episodeProfileOnly: true });
+        const user = userEvent.setup();
+        renderLibrary("/series");
+        await screen.findByRole("link", { name: "Archive title" });
+        await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+        const subtitles = screen.getByRole("combobox", { name: "Subtitles" });
+        await user.click(subtitles);
+        await user.click(
+          screen.getByRole("option", { name: "Missing some", hidden: true }),
+        );
+        expect(subtitles).toHaveValue("Missing some");
+        expect(
+          screen.getByRole("link", { name: "Archive title" }),
+        ).toBeVisible();
+      });
+    }
+
+    it("searches and scans mixed selections through their respective owners", async () => {
+      const { batchArr, searchSource, scanSource } = setup({ attention: false });
+      const user = userEvent.setup();
+      renderLibrary(`/${kind}`);
+      await user.click(
+        await screen.findByRole("checkbox", { name: "Select Archive title" }),
+      );
+      await user.click(
+        screen.getByRole("checkbox", { name: "Select Arr title" }),
+      );
+      const arrItem = {
+        type: contentKind,
+        arr_instance_id: 5,
+        [kind === "series" ? "sonarrSeriesId" : "radarrId"]: 777,
+      };
+      await user.click(screen.getByRole("button", { name: "Search Missing" }));
+      await waitFor(() => {
+        expect(batchArr).toHaveBeenNthCalledWith(1, {
+          action: "search-missing",
+          items: [arrItem],
+        });
+        expect(searchSource).toHaveBeenCalledOnce();
+        expect(screen.getByRole("button", { name: "Scan Disk" })).toBeEnabled();
+      });
+      await user.click(screen.getByRole("button", { name: "Scan Disk" }));
+      await waitFor(() => {
+        expect(batchArr).toHaveBeenNthCalledWith(2, {
+          action: "scan-disk",
+          items: [arrItem],
+        });
+        expect(scanSource).toHaveBeenCalledOnce();
+      });
     });
 
     it("opens a source-only library and targets source-owned search and scan", async () => {

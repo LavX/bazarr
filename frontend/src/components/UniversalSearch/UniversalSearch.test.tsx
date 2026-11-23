@@ -5,11 +5,12 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { DiscoverSetupReturn } from "@/contexts/Discover";
 import { useSearchSource } from "@/contexts/UniversalSearch";
 import { createSubtitleSearchSource } from "@/pages/SubtitleEditor/searchSource";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor, within } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import UniversalSearch from ".";
 
@@ -31,6 +32,7 @@ beforeEach(() => {
         data: { status: "available", source: "tmdb", configured: true },
       }),
     ),
+    http.get("/api/system/media-sources", () => HttpResponse.json({ data: [] })),
     http.get("/api/discover/metadata/search", () =>
       HttpResponse.json({
         data: { status: "available", source: "tmdb", items: [] },
@@ -127,6 +129,74 @@ it("uses canonical library IDs, retains the global query across navigation, and 
   expect(input).toHaveAttribute("aria-expanded", "false");
 });
 
+it("searches sources only while their visibility is known to be enabled", async () => {
+  const settingsKey = [QueryKeys.System, QueryKeys.Settings];
+  const settings = { general: { theme: "dark" }, auth: { type: "none" } };
+  const pendingSettings = Promise.withResolvers<void>();
+  const search = vi.fn();
+  server.use(
+    http.get("/api/system/settings", async () => {
+      await pendingSettings.promise;
+      return HttpResponse.json({
+        ...settings,
+        media_sources: { visible: true },
+      });
+    }),
+    http.get("/api/system/searches", ({ request }) => {
+      const { searchParams } = new URL(request.url);
+      const includeSources = searchParams.get("sources");
+      search(searchParams.get("query"), includeSources);
+      return HttpResponse.json([
+        { id: 901, radarrId: 7, title: "Arrival", year: "2016", poster: null },
+        ...(includeSources === "1"
+          ? [
+              {
+                id: 901,
+                origin: "source",
+                source_kind: "movie",
+                title: "Arrival archive",
+                year: "2016",
+                poster: null,
+              },
+            ]
+          : []),
+      ]);
+    }),
+  );
+  const { user } = mount();
+  const input = screen.getByLabelText("Search");
+  try {
+    await user.type(input, "Arrival");
+    await screen.findByRole("link", { name: /^Arrival \(2016\)/ });
+    expect(search).toHaveBeenLastCalledWith("Arrival", null);
+    expect(
+      screen.queryByRole("link", { name: /^Arrival archive/ }),
+    ).not.toBeInTheDocument();
+  } finally {
+    pendingSettings.resolve();
+  }
+
+  expect(
+    await screen.findByRole("link", { name: /^Arrival archive/ }),
+  ).toBeVisible();
+  expect(search).toHaveBeenLastCalledWith("Arrival", "1");
+  act(() => {
+    queryClient.setQueryData(settingsKey, {
+      ...settings,
+      media_sources: { visible: false },
+    });
+  });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("link", { name: /^Arrival archive/ }),
+    ).not.toBeInTheDocument(),
+  );
+  await user.type(input, " two");
+  await waitFor(() =>
+    expect(search).toHaveBeenLastCalledWith("Arrival two", null),
+  );
+});
+
 it.each([
   {
     selection: "click",
@@ -155,6 +225,11 @@ it.each([
 ])(
   "opens $title with $selection when IDs overlap",
   async ({ selection, title, path, index }) => {
+    queryClient.setQueryData([QueryKeys.System, QueryKeys.Settings], {
+      general: { theme: "dark" },
+      auth: { type: "none" },
+      media_sources: { visible: true },
+    });
     server.use(
       http.get("/api/system/searches", ({ request }) => {
         expect(new URL(request.url).searchParams.get("sources")).toBe("1");
