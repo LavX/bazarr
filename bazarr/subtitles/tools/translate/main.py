@@ -340,7 +340,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         if source is not None:
             if source_video_version is None:
                 # An inline translation can bind the current file. Older queue entries cannot.
-                if expected_destination_versions or any(
+                if any(
                         job['module'] == __name__ and job['func'] == 'translate_subtitles_file'
                         for job in jobs_queue.list_jobs_from_queue(job_id=job_id, status='running')):
                     raise SourceTranslationChanged('The queued translation has no source media version')
