@@ -16,7 +16,7 @@ MAX_SCORES agrees on it.
 import ast
 from datetime import datetime
 
-from sqlalchemy import insert, or_, select
+from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.orm import aliased
 
 from app.database import (TableEpisodes, TableHistory, TableHistoryMovie, TableHistorySports, TableMovies,
@@ -34,6 +34,11 @@ def manual_score_percent(score, score_out_of):
     return round(score * 100 / score_out_of)
 
 
+def sports_history_path(path):
+    """History and the Sportarr index can spell the same Windows path differently."""
+    return func.replace(path, '\\', '/')
+
+
 def newer_sports_file_history(actions):
     """A newer history row for the same sports subtitle file."""
     history = TableHistorySports
@@ -43,8 +48,8 @@ def newer_sports_file_history(actions):
         newer.arr_instance_id == history.arr_instance_id,
         newer.event_id == history.event_id,
         newer.language == history.language,
-        newer.video_path == history.video_path,
-        newer.subtitles_path == history.subtitles_path,
+        sports_history_path(newer.video_path) == sports_history_path(history.video_path),
+        sports_history_path(newer.subtitles_path) == sports_history_path(history.subtitles_path),
         or_(newer.timestamp > history.timestamp,
             (newer.timestamp == history.timestamp) & (newer.id > history.id)),
     ).exists()
@@ -57,8 +62,9 @@ def add_sports_score_overrides(session, events):
         return
     history = TableHistorySports
     rows = session.execute(
-        select(history.arr_instance_id, history.event_id, history.video_path,
-               history.language, history.subtitles_path, history.score, history.score_out_of)
+        select(history.arr_instance_id, history.event_id, sports_history_path(history.video_path).label('video_path'),
+               history.language, sports_history_path(history.subtitles_path).label('subtitles_path'),
+               history.score, history.score_out_of)
         .where(history.arr_instance_id.in_({owner for owner, _ in by_id}),
                history.event_id.in_({event_id for _, event_id in by_id}),
                history.action == MANUAL_SCORE_ACTION,
@@ -67,12 +73,13 @@ def add_sports_score_overrides(session, events):
     )
     for row in rows:
         event = by_id.get((row.arr_instance_id, row.event_id))
-        if event is not None and event['path'] == row.video_path and any(
-            (subtitle[0], subtitle[1]) == (row.language, row.subtitles_path)
-            for subtitle in event['subtitles'] if subtitle and len(subtitle) >= 2 and subtitle[1]
-        ):
-            event.setdefault('manual_subtitle_scores', {})[row.subtitles_path] = manual_score_percent(
-                row.score, row.score_out_of)
+        if event is None or event['path'].replace('\\', '/') != row.video_path:
+            continue
+        for subtitle in event['subtitles']:
+            if (subtitle and len(subtitle) >= 2 and subtitle[1]
+                    and (subtitle[0], subtitle[1].replace('\\', '/')) == (row.language, row.subtitles_path)):
+                event.setdefault('manual_subtitle_scores', {})[subtitle[1]] = manual_score_percent(
+                    row.score, row.score_out_of)
 
 
 def _listed_language(listing, subtitles_path):
@@ -122,6 +129,13 @@ def _set_sports_score_override(database, event_id, subtitles_path, score_percent
                 raise SportsNotFound("Subtitle is not listed for this sports event") from exc
 
         full = MAX_SCORES["movie"]
+        if session.get_bind().dialect.name == 'postgresql':
+            # Publish a new row version with the pin. An upgrade whose serializable
+            # snapshot predates the pin must fail its event lock before writing bytes.
+            session.execute(update(TableSportsEvents).where(
+                TableSportsEvents.id == context.event_id,
+                TableSportsEvents.arr_instance_id == context.arr_instance_id,
+            ).values(subtitles=TableSportsEvents.subtitles))
         session.execute(
             insert(TableHistorySports).values(
                 event_id=context.event_id,

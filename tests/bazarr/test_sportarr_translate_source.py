@@ -314,3 +314,30 @@ def test_the_source_path_is_matched_through_the_instance_path_mapping(sports_his
 
     assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.srt') is True
     assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.forced.srt') is False
+
+
+@pytest.mark.parametrize('origin_action,rejected', [(1, True), (4, False)])
+def test_windows_paths_match_the_owned_recording_and_source_origin(sports_history, monkeypatch, origin_action, rejected):
+    from datetime import timedelta
+
+    from app.config import settings
+    from app.database import TableArrInstances
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    session.get(TableArrInstances, 42).path_mappings = '[["D:/Sports", "/sports"]]'
+    context = _context()
+    context.original_path = r'D:\Sports\race.mkv'
+    now = datetime.now()
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=origin_action,
+                        timestamp=now - timedelta(hours=1), language='hu',
+                        score=10 if origin_action == 1 else None,
+                        subtitles_path='D:/Sports/race.hu.srt', video_path='D:/Sports/race.mkv'))
+    if origin_action == 4:
+        session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=9,
+                            timestamp=now, language='hu', score=0, score_out_of=180,
+                            subtitles_path=r'D:\Sports\race.hu.srt', video_path=context.original_path))
+    session.commit()
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(context, 'hu', '/sports/race.hu.srt') is rejected

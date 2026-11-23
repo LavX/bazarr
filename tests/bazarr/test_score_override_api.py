@@ -584,16 +584,16 @@ def sports_score_api(score_api, monkeypatch):
     return client, session
 
 
-@pytest.mark.parametrize("owner,score,stored_score", [(None, 0, 0), (2, 40, 72)])
+@pytest.mark.parametrize("event_id,owner,score,stored_score", [(62, None, 0, 0), (62.0, 2.0, 40.0, 72)])
 def test_sports_score_override_stores_the_owned_mapped_file_on_the_movie_scale(
-    sports_score_api, owner, score, stored_score
+    sports_score_api, event_id, owner, score, stored_score
 ):
     from app.database import TableHistorySports
     from sportarr.library import get_event, list_events
 
     client, session = sports_score_api
     payload = {
-        "sportsEventId": 62, "subtitlesPath": "/mapped/sports/2/event.en.srt", "score": score,
+        "sportsEventId": event_id, "subtitlesPath": "/mapped/sports/2/event.en.srt", "score": score,
     }
     if owner is not None:
         payload["arr_instance_id"] = owner
@@ -636,6 +636,38 @@ def test_mapped_sports_score_locks_owner_before_event(sports_score_api):
 
     assert response.status_code == 204
     assert locked == [TableArrInstances, TableSportsEvents]
+
+
+def test_a_replacement_with_normalized_windows_paths_releases_the_visible_pin(sports_score_api):
+    from datetime import timedelta
+
+    from app.database import TableHistorySports, TableSportsEvents
+    from sportarr.library import get_event
+
+    client, session = sports_score_api
+    event_row = session.get(TableSportsEvents, 62)
+    original = r'D:\Sports\event.en.srt'
+    event_row.path = r'D:\Sports\event.mkv'
+    event_row.subtitles = str([['en', original, 100]])
+    session.commit()
+    assert client.post(ROOT, json={
+        'sportsEventId': 62, 'subtitlesPath': original, 'score': 0,
+    }, headers=HEADERS).status_code == 204
+
+    normalized = 'D:/Sports/event.en.srt'
+    event_row.subtitles = str([['en', normalized, 100]])
+    session.commit()
+    assert get_event(session, 62, 2)['manual_subtitle_scores'] == {normalized: 0}
+
+    pin = session.execute(select(TableHistorySports)).scalar_one()
+    session.add(TableHistorySports(
+        event_id=62, league_id=52, arr_instance_id=2, action=1, language='en',
+        video_path='D:/Sports/event.mkv', subtitles_path=normalized,
+        timestamp=pin.timestamp + timedelta(seconds=1),
+    ))
+    session.commit()
+
+    assert get_event(session, 62, 2).get('manual_subtitle_scores', {}) == {}
 
 
 def test_a_concurrent_sports_event_change_returns_a_conflict(sports_score_api):

@@ -27,7 +27,7 @@ from sportarr.subtitles import (
     sports_history,
 )
 from subtitles.language_profiles import profile_item_language_code
-from subtitles.score_override import MANUAL_SCORE_ACTION, manual_score_percent
+from subtitles.score_override import MANUAL_SCORE_ACTION, manual_score_percent, sports_history_path
 from subtitles.wanted.utils import FILE_REPLACING_ACTIONS
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 from subtitles.tools.subsync_engines import (
@@ -524,10 +524,10 @@ def _source_score_below_threshold(context, source_lang, source_path=None):
 
     rows = database.execute(
         select(TableHistorySports.score, TableHistorySports.score_out_of,
-               TableHistorySports.action, TableHistorySports.subtitles_path)
+               TableHistorySports.action, sports_history_path(TableHistorySports.subtitles_path).label('subtitles_path'))
         .where(TableHistorySports.event_id == context.event_id)
         .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
-        .where(TableHistorySports.video_path == context.original_path)
+        .where(sports_history_path(TableHistorySports.video_path) == sports_history_path(context.original_path))
         .where(TableHistorySports.language.like(f"{source_lang}%"))
         .where(
             TableHistorySports.score.is_not(None)
@@ -537,9 +537,11 @@ def _source_score_below_threshold(context, source_lang, source_path=None):
     ).all()
     if source_path is not None:
         mappings = read_sports_mappings(_instance_mappings(context))
+        local_source = source_path.replace('\\', '/')
         rows = [
             row for row in rows
-            if row.subtitles_path and apply_sports_mapping(row.subtitles_path, mappings) == source_path
+            if row.subtitles_path and apply_sports_mapping(row.subtitles_path, mappings).replace('\\', '/')
+            == local_source
         ]
     from subtitles.utils import MAX_SCORES
 

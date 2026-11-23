@@ -35,7 +35,7 @@ from sportarr.output import (
     validate_output_path,
 )
 from sportarr.sync.leagues import require_sportarr
-from subtitles.score_override import MANUAL_SCORE_ACTION, newer_sports_file_history
+from subtitles.score_override import MANUAL_SCORE_ACTION, newer_sports_file_history, sports_history_path
 from subtitles.wanted.utils import FILE_REPLACING_ACTIONS
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
@@ -409,7 +409,7 @@ def _validate_upgrade_score_pins(session, context, mappings, *paths):
         select(history.subtitles_path).where(
             history.event_id == context.event_id,
             history.arr_instance_id == context.arr_instance_id,
-            history.video_path == context.original_path,
+            sports_history_path(history.video_path) == sports_history_path(context.original_path),
             history.action == MANUAL_SCORE_ACTION,
             history.subtitles_path.is_not(None),
             ~newer_sports_file_history(FILE_REPLACING_ACTIONS + (MANUAL_SCORE_ACTION,)),
