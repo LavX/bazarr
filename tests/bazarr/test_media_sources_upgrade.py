@@ -473,6 +473,119 @@ def test_source_upgrade_leaves_another_videos_generated_name_alone(world, monkey
 
 
 @pytest.mark.parametrize('change', [
+    'destination owner', 'previous owner', 'generated owner', 'symlink retarget', 'unrelated video',
+    'previous edit', 'generated edit',
+])
+def test_source_upgrade_checks_local_ownership_and_versions_at_publication(world, monkeypatch, change):
+    from media_sources import indexer
+    from subtitles import upgrade
+    from subtitles.tools.subsync_engines import engine_output_path
+
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path)
+    destination = folder / media.with_suffix('.en.srt').name
+    same_name = change != 'previous owner'
+    original = destination if same_name else folder / media.with_suffix('.en.hi.srt').name
+    generated = engine_output_path(original, 'ffsubsync')
+    original.write_bytes(b'Old subtitle')
+    generated.write_bytes(b'Old generated subtitle')
+    indexer.index_item(context.item_id)
+    first = _history(world.db, world.source_id, context.item_id, media, original,
+                     language='en' if same_name else 'en:hi')
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+
+    alias = media.with_name('Alias.mkv')
+    if change == 'symlink retarget':
+        unrelated = video(world.tmp_path / 'Other' / 'Unrelated.mkv')
+        competing = video(unrelated.with_name(destination.with_suffix('.mkv').name))
+        alias.symlink_to(unrelated)
+
+    publish = indexer.source_item_publication
+    reached = []
+
+    @contextmanager
+    def change_after_prepare(source, **kwargs):
+        with publish(source, **kwargs) as guarded:
+            reached.append(source.item_id)
+            if change == 'destination owner':
+                video(media.with_name(destination.with_suffix('.mkv').name))
+            elif change == 'previous owner':
+                video(media.with_name(original.with_suffix('.mkv').name))
+            elif change == 'generated owner':
+                video(media.with_name(generated.with_suffix('.mkv').name))
+            elif change == 'symlink retarget':
+                alias.unlink()
+                alias.symlink_to(competing)
+            elif change == 'unrelated video':
+                video(media.with_name('Unrelated.mkv'))
+            elif change == 'previous edit':
+                original.write_bytes(b'Edited original subtitle')
+            else:
+                generated.write_bytes(b'Edited generated subtitle')
+            yield guarded
+
+    monkeypatch.setattr(indexer, 'source_item_publication', change_after_prepare)
+    upgrade.upgrade_source_subtitles(job_id=10)
+
+    assert reached == [context.item_id]
+    if change == 'unrelated video':
+        assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
+        assert destination.read_bytes() == pipeline.CONTENT
+        assert not generated.exists()
+        return
+    assert record_rows(world.db) == [(first, 1, None)]
+    assert original.read_bytes() == (b'Edited original subtitle' if change == 'previous edit' else b'Old subtitle')
+    assert generated.read_bytes() == (b'Edited generated subtitle' if change == 'generated edit'
+                                      else b'Old generated subtitle')
+    if not same_name:
+        assert not destination.exists()
+    assert not world.published
+    assert not list(folder.glob('.bazarr-sync-obsolete-*'))
+
+
+def test_source_upgrade_rejects_subtitle_folder_change_after_saver_selected_destination(world, monkeypatch):
+    from app.config import settings
+    from media_sources.indexer import index_item
+    from subtitles import download, upgrade
+    from subtitles.tools.subsync_engines import engine_output_path
+
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    original = media.with_suffix('.en.srt')
+    generated = engine_output_path(original, 'ffsubsync')
+    original.write_bytes(b'Old subtitle')
+    generated.write_bytes(b'Old generated subtitle')
+    index_item(context.item_id)
+    first = _history(world.db, world.source_id, context.item_id, media, original)
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+    new_folder = world.tmp_path / 'new-subtitle-folder'
+    new_folder.mkdir()
+    save = download.save_subtitles
+    reached = []
+
+    def change_before_saving(*args, **kwargs):
+        reached.append(kwargs['directory'])
+        monkeypatch.setattr(settings.general, 'subfolder', 'absolute')
+        monkeypatch.setattr(settings.general, 'subfolder_custom', str(new_folder))
+        return save(*args, **kwargs)
+
+    monkeypatch.setattr(download, 'save_subtitles', change_before_saving)
+    upgrade.upgrade_source_subtitles(job_id=10)
+
+    assert reached == [None]
+    assert record_rows(world.db) == [(first, 1, None)]
+    assert original.read_bytes() == b'Old subtitle'
+    assert generated.read_bytes() == b'Old generated subtitle'
+    assert not list(new_folder.iterdir())
+    assert not world.published
+
+
+@pytest.mark.parametrize('change', [
     'subtitle', 'monitoring', 'other destination', 'arr owner', 'arr owner after prepare',
     'shared Arr owner after prepare', 'mapped shared Arr owner after prepare', 'mapped shared Arr owner at old stem',
     'history score', 'history superseded',

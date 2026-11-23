@@ -124,7 +124,7 @@ def translation_write_kwargs(translator, job_id):
         @contextmanager
         def publication():
             try:
-                with owners.publication(source, prepare, destination=translator.dest_srt_file) as (
+                with owners.publication(source, prepare, destination=translator.dest_srt_file, cleanup_outputs=True) as (
                         current, connection, prepared):
                     if current is None or current.profile_id != prepared.profile_id:
                         raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
@@ -140,7 +140,7 @@ def translation_write_kwargs(translator, job_id):
                 raise SourceTranslationChanged('An Arr item now owns the source path')
             except SourcePublicationOwnersChanged as error:
                 raise SourceTranslationChanged(str(error)) from error
-        kwargs.update(publication_guard=publication, ownership_index=owners)
+        kwargs.update(publication_guard=publication, invalidate_outputs=False)
     return kwargs
 
 

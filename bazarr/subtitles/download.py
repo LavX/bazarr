@@ -14,10 +14,10 @@ import ast
 from contextlib import ExitStack, contextmanager
 
 from subzero.language import Language
-from subliminal_patch.core import is_vobsub_pair, save_subtitles
+from subliminal_patch.core import save_subtitles
 from subtitles.tools.subsync_engines import (
-    SYNC_ENGINES, SubtitleDestinationChanged, SubtitleSourceChanged, _report_subtitle_publication,
-    engine_output_path, is_sync_engine_output, regular_subtitle_version, subtitle_mutation,
+    SubtitleDestinationChanged, SubtitleSourceChanged, _report_subtitle_publication,
+    local_subtitle_ownership_is_current, plan_sync_output_cleanup, regular_subtitle_version, subtitle_mutation,
     subtitle_source_version, subtitle_write_locks, sync_output_owner_is_unique, write_subtitle_file,
 )
 from subliminal_patch.core_persistent import download_best_subtitles
@@ -26,7 +26,7 @@ from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, select, get_profiles_list
 from app.jobs_queue import JobCancelled
 from utilities.path_mappings import path_mappings
-from utilities.helper import get_target_folder, force_unicode
+from utilities.helper import force_unicode, get_subtitle_destination_folder, get_target_folder
 from languages.get_languages import alpha3_from_alpha2
 
 from .mismatch import clear_mismatch_for_video, report_release_type_mismatch
@@ -198,6 +198,9 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             subtitle_formats.add(s.format)
 
                         try:
+                            destination_setting = (
+                                _source_subtitle_destination_setting() if source_upgrade is not None else None
+                            )
                             fld = get_target_folder(path)
                             chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
                                 'win') and settings.general.chmod_enabled else None
@@ -215,7 +218,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      is_upgrade=is_upgrade, written_paths=written_paths,
                                                      on_publish=publish, wanted_stamp=source_wanted_stamp,
                                                      wanted_profile=wanted_profile, upgrade=source_upgrade,
-                                                     video_version=video_version)
+                                                     video_version=video_version,
+                                                     destination_setting=destination_setting)
                                     if is_upgrade and source_upgrade is None:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
@@ -420,33 +424,13 @@ def _quarantine_upgrade_output(path, expected_version):
         raise
 
 
-def _prepare_upgrade_outputs(video_path, paths, ownership_index):
-    outputs = {}
-    vobsub_indexes = {}
-    for path in paths:
-        if is_sync_engine_output(path):
-            continue
-        for engine in SYNC_ENGINES:
-            output = engine_output_path(path, engine)
-            version = regular_subtitle_version(output)
-            if version is None or output in outputs:
-                continue
-            if output.suffix.lower() == '.sub':
-                if output.parent not in vobsub_indexes:
-                    with os.scandir(output.parent) as entries:
-                        vobsub_indexes[output.parent] = {entry.name.lower() for entry in entries
-                                                         if entry.name.lower().endswith('.idx')
-                                                         and entry.is_file(follow_symlinks=False)}
-                if is_vobsub_pair(output.name, vobsub_indexes[output.parent]):
-                    continue
-            if sync_output_owner_is_unique(video_path, output, ownership_index=ownership_index):
-                outputs[output] = version
-    return outputs
+def _source_subtitle_destination_setting():
+    return settings.general.subfolder, get_subtitle_destination_folder()
 
 
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
                            written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None,
-                           video_version=None):
+                           video_version=None, destination_setting=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
@@ -474,14 +458,17 @@ def _write_source_download(video_path, destination, content, *, source, language
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
         if old_path is not None:
             paths = (old_path, destination) if remove_previous else (destination,)
-            return _prepare_upgrade_outputs(video_path, paths, ownership_index)
+            outputs = tuple(output for path in paths
+                            for output in plan_sync_output_cleanup(video_path, path, ownership_index))
+            return paths, outputs
         if wanted_stamp is None and recheck_missing:
             return prepare_source_sidecars(source, ownership_index, written_paths)
         return None
 
     @contextmanager
     def publication(files):
-        with ownership_index.publication(source, prepare, destination=registry_destination) as (
+        with ownership_index.publication(source, prepare, destination=registry_destination,
+                                         cleanup_outputs=upgrade is None) as (
                 current, connection, prepared):
             if current is None or current.path != video_path:
                 raise SubtitleDestinationChanged('The source item moved or was removed')
@@ -493,9 +480,15 @@ def _write_source_download(video_path, destination, content, *, source, language
             if upgrade is not None:
                 if current.profile_id != source.profile_id or not upgrade.can_publish(current, target=connection):
                     raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
-                files.enter_context(subtitle_mutation(video_path, old_path, *prepared, invalidate_outputs=False))
+                if destination_setting is not None and destination_setting != _source_subtitle_destination_setting():
+                    raise SubtitleDestinationChanged('The subtitle destination setting changed before publication')
+                paths, outputs = prepared
+                output_paths = tuple(path for path, _ in outputs)
+                if not local_subtitle_ownership_is_current(video_path, (*paths, *output_paths), ownership_index):
+                    raise SubtitleDestinationChanged('Subtitle ownership in the source directory changed during search')
+                files.enter_context(subtitle_mutation(video_path, old_path, *output_paths, invalidate_outputs=False))
                 files.enter_context(_preserve_source_subtitle(old_path, upgrade.subtitle_version, retire=remove_previous))
-                for output, version in prepared.items():
+                for output, version in outputs:
                     files.enter_context(_quarantine_upgrade_output(output, version))
             elif wanted_stamp is not None:
                 if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile, target=connection):
@@ -512,9 +505,8 @@ def _write_source_download(video_path, destination, content, *, source, language
             write_subtitle_file(video_path, destination, content,
                                 written_paths=written_paths if upgrade is None else None,
                                 on_publish=on_publish if upgrade is None else None,
-                                publication_guard=partial(publication, files), ownership_index=ownership_index,
-                                rollback_new_on_guard_error=upgrade is not None,
-                                invalidate_outputs=upgrade is None)
+                                publication_guard=partial(publication, files),
+                                rollback_new_on_guard_error=upgrade is not None, invalidate_outputs=False)
     except SubtitleDestinationChanged as error:
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False

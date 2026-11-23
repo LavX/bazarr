@@ -318,6 +318,9 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
     for subtitle in names:
         if not sync_engine_from_subtitle_name(subtitle):
             continue
+        stem, extension = os.path.splitext(subtitle)
+        if extension.lower() not in core.SUBTITLE_EXTENSIONS:
+            continue
         if core.is_vobsub_pair(subtitle, vobsub_indexes):
             subtitles.pop(subtitle, None)
             continue
@@ -330,11 +333,10 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
             if not sync_output_owner_is_unique(video_path, subtitle_path, ownership_index=ownership_index):
                 subtitles.pop(subtitle, None)
                 continue
-            if _normalized_video_stem(os.path.splitext(subtitle)[0]) == video_stem:
+            if _normalized_video_stem(stem) == video_stem:
                 # A registered video can include the engine name in its own basename.
                 subtitles.setdefault(subtitle, None)
                 continue
-            stem, extension = os.path.splitext(subtitle)
             source_path = os.path.join(dest_folder, stem.rsplit('.', 1)[0] + extension)
             if source_path not in ownership:
                 ownership[source_path] = sync_output_owner_is_unique(video_path, source_path,
@@ -346,9 +348,6 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
             continue
 
         if video_stem is not None:
-            stem, extension = os.path.splitext(subtitle)
-            if extension.lower() not in core.SUBTITLE_EXTENSIONS:
-                continue
             owner_stem = _normalized_video_stem(stem.rsplit('.', 1)[0])
             if owner_stem == video_stem:
                 # The complete basename owns an untagged output. Detect its

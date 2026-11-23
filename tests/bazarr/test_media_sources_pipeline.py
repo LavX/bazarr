@@ -146,6 +146,42 @@ def test_download_keeps_another_registered_videos_exact_engine_named_sidecar(wor
     found = add_sync_engine_outputs(folder, {}, video_path=str(competing),
                                     ownership_index=SourcePublicationOwnerIndex())
     assert protected.name in found
+    local_found = add_sync_engine_outputs(competing.parent, {}, video_path=str(competing),
+                                          ownership_index=SourcePublicationOwnerIndex())
+    assert competing.name not in local_found
+
+
+def test_source_download_does_not_clean_generated_siblings_after_releasing_the_owner_proof(world, monkeypatch):
+    from contextlib import contextmanager
+
+    from media_sources import indexer
+    from subtitles.download import _write_source_download
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, 'Film.mkv')
+    other_source, other_library, other_root = add_source(world.db, world.tmp_path, name='Other', folder='Other')
+    destination = folder / 'Film.en.srt'
+    obsolete = folder / 'Film.en.alass.srt'
+    obsolete.write_bytes(CONTENT)
+    protected = folder / 'Film.en.ffsubsync.srt'
+    original_publication = indexer.source_item_publication
+    before_commit = []
+
+    @contextmanager
+    def publish_then_admit(source, *, shared=False):
+        with original_publication(source, shared=shared) as outcome:
+            yield outcome
+            before_commit.append(obsolete.exists())
+        # The scanner and the other writer land as soon as the registry is writable again.
+        add_item(world.db, other_source, other_library, video(other_root / 'Film.en.ffsubsync.mkv'))
+        protected.write_bytes(CONTENT)
+
+    monkeypatch.setattr(indexer, 'source_item_publication', publish_then_admit)
+    assert _write_source_download(context.path, str(destination), CONTENT, source=context,
+                                  language=Language('eng'), recheck_missing=False, is_upgrade=False,
+                                  written_paths=[], on_publish=None)
+    assert before_commit == [False]
+    assert destination.read_bytes() == protected.read_bytes() == CONTENT
 
 
 def test_download_keeps_a_provider_result_from_reaching_a_replaced_video(world, monkeypatch):
@@ -1392,6 +1428,67 @@ def test_shared_source_publication_holds_concurrent_legacy_admission_until_exit(
                 pending.result(timeout=0.15)
         pending.result(timeout=4)
     assert not sync_output_owner_is_unique(context.path, destination, ownership_index=SourcePublicationOwnerIndex())
+
+
+@pytest.mark.parametrize('mapping', ['radarr-global', 'radarr-instance', 'sportarr-global'])
+def test_source_download_rechecks_mappings_for_an_existing_owner_in_a_shared_relative_folder(
+        world, monkeypatch, mapping):
+    import json
+
+    from app.config import settings
+    from app.database import TableArrInstances
+    from discover.metadata import CONFIG_LOCK
+    from media_sources.db import source_transaction
+    from media_sources.indexer import SourcePublicationOwnerIndex
+    from subtitles.download import _write_source_download
+    from subtitles.tools.subsync_engines import sync_output_owner_is_unique
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
+    monkeypatch.setattr(path_mappings, 'path_mapping_series', [])
+    monkeypatch.setattr(path_mappings, 'path_mapping_movies', [])
+    monkeypatch.setattr(settings.general, 'path_mappings_sports', [])
+    context = _movie(world, 'Film.mkv')
+    folder = Path(context.path).parent / 'Subs'
+    folder.mkdir()
+    other = video(world.tmp_path / 'mapped' / 'Film.mkv')
+    (other.parent / 'Subs').symlink_to(folder, target_is_directory=True)
+    remote = str(world.tmp_path / 'remote')
+    owner, scope = mapping.split('-')
+    insertion = _legacy_owner_insert(world, owner, Path(remote) / 'Film.mkv')
+    with source_transaction() as connection:
+        connection.execute(insertion)
+    destination = folder / 'Film.en.srt'
+    assert sync_output_owner_is_unique(context.path, str(destination), ownership_index=SourcePublicationOwnerIndex())
+
+    snapshot = SourcePublicationOwnerIndex._registry_snapshot
+    applied = []
+
+    def prepare_then_change_mapping(self, target=None):
+        rows = snapshot(self, target)
+        if target is None and not applied:
+            pairs = [[remote, str(other.parent)]]
+            with CONFIG_LOCK:
+                if scope == 'instance':
+                    with source_transaction() as connection:
+                        connection.execute(sa.update(TableArrInstances).where(TableArrInstances.kind == owner)
+                                           .values(path_mappings=json.dumps(pairs)))
+                elif owner == 'sportarr':
+                    monkeypatch.setattr(settings.general, 'path_mappings_sports', pairs)
+                else:
+                    monkeypatch.setattr(settings.general, 'path_mappings', [])
+                    monkeypatch.setattr(settings.general, 'path_mappings_movie', pairs)
+                    path_mappings.update()
+            applied.append(True)
+        return rows
+
+    monkeypatch.setattr(SourcePublicationOwnerIndex, '_registry_snapshot', prepare_then_change_mapping)
+    assert not _write_source_download(context.path, str(destination), CONTENT, source=context,
+                                      language=Language('eng'), recheck_missing=False, is_upgrade=False,
+                                      written_paths=[], on_publish=None)
+    assert applied == [True] and not destination.exists()
+    assert not sync_output_owner_is_unique(context.path, str(destination), ownership_index=SourcePublicationOwnerIndex())
 
 
 @pytest.mark.parametrize("layout", ["relative", "absolute"])
