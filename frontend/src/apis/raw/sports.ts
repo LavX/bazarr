@@ -66,6 +66,8 @@ export interface SportsEvent extends SportsEventReference {
   ][];
   missing_subtitles: string[];
   sync_status?: Record<string, SubtitleSyncStatus>;
+  /** Current manual percentages, keyed by the exact indexed subtitle path. */
+  manual_subtitle_scores?: Record<string, number>;
 }
 
 export interface SportsPublication {

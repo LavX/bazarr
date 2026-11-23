@@ -32,7 +32,7 @@ interface Props extends WizardStepProps {
  * asked about first. The panel itself is untouched, which keeps Settings and
  * the wizard on one copy of the account flow.
  */
-const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
+const PlexServerForm: FC<Props> = ({ draft, onNext, onBack, onWritten }) => {
   const { markSaved } = useOnboardingSelection();
   const { data: instances, refetch } = useMediaServerInstances("plex");
   const { refetch: refetchSettings } = useSystemSettings();
@@ -110,6 +110,7 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           (candidate) => candidate.id === recorded,
         );
         if (row) {
+          onWritten?.();
           markSaved(draft.draftId, row.id);
           connected = true;
         }

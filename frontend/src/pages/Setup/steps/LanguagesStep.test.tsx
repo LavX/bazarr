@@ -392,8 +392,7 @@ describe("LanguagesStep", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
     expect(mutate).not.toHaveBeenCalled();
-    // Profiles exist already, which is an answer.
-    expect(onNext).toHaveBeenCalledWith();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
   });
 
   it("renders a Back button when onBack is provided", () => {

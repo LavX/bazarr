@@ -80,7 +80,11 @@ const InstallAction: FC<{
  * Hub: it shows what the install adds and sends its digest. An engine the catalog does not list gets
  * its button disabled, with the reason beside it.
  */
-const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
+const TranslationStep: FC<WizardStepProps> = ({
+  onNext,
+  onBack,
+  onWritten,
+}) => {
   const state = useRestartAware();
   const pointers = usePointersMutation();
   const install = useEngineInstall(state.data);
@@ -173,17 +177,9 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                 </Button>
               )}
             </Group>
-            {saved ? (
-              // Something was saved, by this visit or an earlier one: that is an answer, though
-              // Continue writes nothing.
-              <Button onClick={() => onNext()} disabled={busy}>
-                Continue
-              </Button>
-            ) : (
-              <Button onClick={() => onNext(NOTHING_WRITTEN)} disabled={busy}>
-                Continue without translation
-              </Button>
-            )}
+            <Button onClick={() => onNext(NOTHING_WRITTEN)} disabled={busy}>
+              {saved ? "Continue" : "Continue without translation"}
+            </Button>
           </Group>
         </Stack>
       }
@@ -249,6 +245,7 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                   engine={official}
                   onPin={setPinned}
                   onBusy={setStarting}
+                  onBackendSaved={onWritten}
                   locked={pointers.isPending}
                   // Setup has no set-up form to open: the Translation page has it, and the key
                   // is saved, so leaving is an answer.

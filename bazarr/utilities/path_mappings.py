@@ -175,13 +175,20 @@ def _instance_path_mapping(arr_instance_id, media_type, *, target=None):
 
             row = ArrInstanceRepository(database).get(arr_instance_id)
             stored_mapping = row.path_mappings if row is not None else None
-        if not stored_mapping:
-            return None
-        parsed = json.loads(stored_mapping)
     except Exception:
         logging.debug('BAZARR could not load per-instance path_mappings for instance %s', arr_instance_id)
         return None
 
+    return _parse_instance_path_mapping(stored_mapping, media_type)
+
+
+def _parse_instance_path_mapping(stored_mapping, media_type):
+    if not stored_mapping:
+        return None
+    try:
+        parsed = json.loads(stored_mapping)
+    except (TypeError, ValueError):
+        return None
     if isinstance(parsed, dict):
         key = 'movies' if media_type in ('movie', 'movies') else 'series'
         mapping = parsed.get(key)

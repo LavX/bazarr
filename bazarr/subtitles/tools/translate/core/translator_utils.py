@@ -204,9 +204,11 @@ def record_source_translation(source, result):
     """Record an action-6 row when the translation belongs to a source item."""
     if source is None:
         return False
+    from media_sources.db import source_transaction
     from media_sources.history import history_log_source
 
-    history_log_source(6, source, result)
+    with source_transaction() as connection:
+        history_log_source(6, source, result, target=connection)
     return True
 
 

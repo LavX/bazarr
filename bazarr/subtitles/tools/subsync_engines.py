@@ -220,7 +220,8 @@ def subtitle_mutation(video_path, *paths, invalidate_outputs=True, ownership_ind
 def staged_subtitle_write(video_path, destination, before_publish=None, allow_empty=False,
                           source_paths=(), after_publish=None, on_publish=None,
                           publication_guard=None, cancel=None, expected_versions=(),
-                          after_write=None, ownership_index=None, rollback_new_on_guard_error=False):
+                          after_write=None, ownership_index=None, rollback_new_on_guard_error=False,
+                          invalidate_outputs=True):
     """Compute privately, then publish only while source and destination are current."""
     with subtitle_write_locks(video_path, destination, *source_paths,
                               **({} if cancel is None else {'cancel': cancel})) as states:
@@ -242,7 +243,7 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
             raise OSError('Subtitle writer did not produce a nonempty file')
         with subtitle_write_locks(video_path, destination, *source_paths,
                                   **({} if cancel is None else {'cancel': cancel})):
-            with subtitle_mutation(video_path, destination,
+            with subtitle_mutation(video_path, destination, invalidate_outputs=invalidate_outputs,
                                    **({'ownership_index': ownership_index} if ownership_index is not None else {})):
                 installed = None
                 try:
@@ -319,10 +320,11 @@ def validate_subtitle_versions(snapshots):
 
 def write_subtitle_file(video_path, destination, content, written_paths=None,
                         on_publish=None, publication_guard=None, after_write=None, ownership_index=None,
-                        rollback_new_on_guard_error=False):
+                        rollback_new_on_guard_error=False, invalidate_outputs=True):
     """Write one saver output atomically and record that exact successful path."""
     with staged_subtitle_write(video_path, destination, on_publish=on_publish,
                               publication_guard=publication_guard, after_write=after_write,
+                              invalidate_outputs=invalidate_outputs,
                               rollback_new_on_guard_error=rollback_new_on_guard_error,
                               after_publish=(lambda: written_paths.append(destination))
                               if written_paths is not None else None,
@@ -401,14 +403,11 @@ class SyncOutputOwnerIndex:
         self._owners = {}
 
     @staticmethod
-    def _load_owners(target=None):
+    def _registry_rows(target=None, *, snapshot_mappings=False):
         from app.database import database, select, TableEpisodes, TableMovies, TableSportsEvents, TableArrInstances
-        from utilities.helper import get_target_folder
-        from utilities.path_mappings import _apply_mapping, _instance_path_mapping, path_mappings
-        from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
-        owners = {}
-        instance_mappings = {}
+        connection = database if target is None else target
+        rows = []
         for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie'),
                                   (TableSportsEvents, 'sports')):
             query = select(table.path, table.arr_instance_id)
@@ -416,35 +415,58 @@ class SyncOutputOwnerIndex:
                 query = query.add_columns(TableArrInstances.path_mappings).join(
                     TableArrInstances, table.arr_instance_id == TableArrInstances.id).where(
                     TableArrInstances.kind == 'sportarr')
-            for row in (database if target is None else target).execute(query).all():
+            elif snapshot_mappings:
+                query = query.add_columns(TableArrInstances.path_mappings).outerjoin(
+                    TableArrInstances, table.arr_instance_id == TableArrInstances.id)
+            rows.append((media_type, tuple(connection.execute(query.order_by(table.id)).all())))
+        return tuple(rows)
+
+    @staticmethod
+    def _map_registry_rows(registry_rows, *, snapshot_mappings=False):
+        from utilities.path_mappings import (_apply_mapping, _parse_instance_path_mapping, apply_sports_mapping,
+                                            path_mappings, read_sports_mappings)
+
+        owners = {}
+        for media_type, rows in registry_rows:
+            for row in rows:
                 if not row.path:
                     continue
                 # Disabled sports owners retain physical files. They still reserve
                 # shared outputs, without authorizing any operation on those rows.
                 if media_type == 'sports':
                     mapped_path = apply_sports_mapping(row.path, read_sports_mappings(row.path_mappings))
-                elif target is None:
-                    mapped_path = path_mappings.path_replace_instance(row.path, row.arr_instance_id, media_type)
-                else:
-                    key = row.arr_instance_id, media_type
-                    if key not in instance_mappings:
-                        instance_mappings[key] = _instance_path_mapping(*key, target=target)
-                    mapping = instance_mappings[key]
+                elif snapshot_mappings:
+                    mapping = _parse_instance_path_mapping(row.path_mappings, media_type)
                     if mapping is not None:
                         mapped_path = _apply_mapping(row.path, mapping, reverse=False)
                     elif media_type == 'movie':
                         mapped_path = path_mappings.path_replace_movie(row.path)
                     else:
                         mapped_path = path_mappings.path_replace(row.path)
-                mapped = os.path.normcase(os.path.realpath(mapped_path))
-                folders = {os.path.dirname(mapped)}
-                custom_folder = get_target_folder(mapped, create=False)
-                if custom_folder:
-                    folders.add(os.path.normcase(os.path.realpath(custom_folder)))
-                stem = _normalized_media_stem(mapped)
-                for folder in folders:
-                    owners.setdefault((folder, stem), set()).add(mapped)
+                else:
+                    mapped_path = path_mappings.path_replace_instance(row.path, row.arr_instance_id, media_type)
+                SyncOutputOwnerIndex._add_owner_claims(owners, mapped_path)
         return owners
+
+    @staticmethod
+    def _add_owner_claims(owners, path):
+        from utilities.helper import get_target_folder
+
+        canonical = os.path.normcase(os.path.realpath(path))
+        # The logical basename can own a subtitle even when the video is a symlink.
+        for name in {os.path.abspath(path), canonical}:
+            folders = {os.path.dirname(name)}
+            custom_folder = get_target_folder(name, create=False)
+            if custom_folder:
+                folders.add(custom_folder)
+            stem = _normalized_media_stem(name)
+            for folder in folders:
+                key = os.path.normcase(os.path.realpath(folder)), stem
+                owners.setdefault(key, set()).add(canonical)
+
+    @staticmethod
+    def _load_owners():
+        return SyncOutputOwnerIndex._map_registry_rows(SyncOutputOwnerIndex._registry_rows())
 
     def folder_is_shared(self, directory):
         return False
@@ -484,13 +506,14 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
                          else {stem(video), stem(source_path)})
     try:
         with os.scandir(media_directory) as entries:
-            local_videos = {os.path.normcase(os.path.realpath(entry.path)) for entry in entries
+            local_videos = {entry.path: os.path.normcase(os.path.realpath(entry.path)) for entry in entries
                             if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS)}
-        if any(path != video and stem(path) in conflicting_stems for path in local_videos):
+        if any(canonical != video and (stem(path) in conflicting_stems or stem(canonical) in conflicting_stems)
+               for path, canonical in local_videos.items()):
             return False
         if directory == media_directory and (ownership_index is None or not ownership_index.folder_is_shared(
                 directory)):
-            return video in local_videos
+            return video in local_videos.values()
 
         # Separate media directories can share a custom subtitle folder. Keep
         # all mapped owners, amortizing that lookup only within an explicit scan.

@@ -149,8 +149,10 @@ def source_item_publication(source, *, shared=False):
         shared_postgres = shared and connection.dialect.name == 'postgresql'
         item = repository.get_item(source.item_id, connection, for_update=True, nowait=shared_postgres)
         if item is not None and shared_postgres:
-            # The item row lock alone cannot see an owner the scanner is about to insert.
-            # Take it first, as the scanner may need to upgrade from its row lock to UPDATE.
-            connection.execute(text('LOCK TABLE table_source_items IN SHARE MODE NOWAIT'))
+            # The row lock alone cannot prevent a source, Arr or Sportarr
+            # writer from admitting another owner in the shared folder.
+            # Take the item lock first and leave any busy writer free to finish.
+            connection.execute(text('LOCK TABLE table_source_items, table_episodes, table_movies, '
+                                    'table_sports_events, arr_instances IN SHARE MODE NOWAIT'))
         current = _same_context(source, _context_for_item(item, connection)) if item is not None else None
         yield current, connection

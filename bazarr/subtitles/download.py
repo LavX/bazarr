@@ -3,6 +3,7 @@
 
 import os
 import sys
+import tempfile
 import logging
 from copy import deepcopy
 from functools import partial
@@ -13,11 +14,12 @@ import ast
 from contextlib import ExitStack, contextmanager
 
 from subzero.language import Language
-from subliminal_patch.core import save_subtitles
-from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, SubtitleSourceChanged, subtitle_write_locks,
-                                             _report_subtitle_publication, quarantine_sync_outputs_after_mutation,
-                                             regular_subtitle_version, subtitle_mutation,
-                                             sync_output_owner_is_unique, write_subtitle_file)
+from subliminal_patch.core import is_vobsub_pair, save_subtitles
+from subtitles.tools.subsync_engines import (
+    SYNC_ENGINES, SubtitleDestinationChanged, SubtitleSourceChanged, _report_subtitle_publication,
+    engine_output_path, is_sync_engine_output, regular_subtitle_version, subtitle_mutation,
+    subtitle_source_version, subtitle_write_locks, sync_output_owner_is_unique, write_subtitle_file,
+)
 from subliminal_patch.core_persistent import download_best_subtitles
 
 from app.config import settings
@@ -40,6 +42,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                        arr_instance_id=None, source=None, auto_translate=True, source_wanted_stamp=None,
                        source_upgrade=None):
     if not languages:
+        return None
+
+    video_version = subtitle_source_version(path) if source is not None else None
+    if source is not None and video_version is None:
         return None
 
     # A media source item is described by its context. Its publication type is what the media servers hear
@@ -208,7 +214,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                      language=source_language, recheck_missing=check_if_still_required,
                                                      is_upgrade=is_upgrade, written_paths=written_paths,
                                                      on_publish=publish, wanted_stamp=source_wanted_stamp,
-                                                     wanted_profile=wanted_profile, upgrade=source_upgrade)
+                                                     wanted_profile=wanted_profile, upgrade=source_upgrade,
+                                                     video_version=video_version)
                                     if is_upgrade and source_upgrade is None:
                                         from media_sources.indexer import SourcePublicationOwnerIndex
 
@@ -347,10 +354,20 @@ def check_missing_languages_source(source, *, stored=False, external_subtitles=N
     return _get_language_obj(languages=candidates)
 
 
+def _restore_upgrade_file(backup, path):
+    from subtitles.new_subtitle import _restore_backup
+
+    try:
+        if not _restore_backup(backup, path):
+            logging.error('BAZARR could not restore %s because the path is occupied. Kept %s', path, backup)
+    except OSError:
+        logging.exception('BAZARR could not restore %s from %s', path, backup)
+
+
 @contextmanager
-def _retire_source_subtitle(path, expected_version):
-    """Remove the old filename before publication and restore it if publication fails."""
-    from subtitles.new_subtitle import _backup_for_replacement, _discard, _restore_backup
+def _preserve_source_subtitle(path, expected_version, *, retire):
+    """Back up the old bytes until the transaction commits."""
+    from subtitles.new_subtitle import _backup_for_replacement, _discard
 
     try:
         backup = _backup_for_replacement(path, expected_version=expected_version)
@@ -362,7 +379,8 @@ def _retire_source_subtitle(path, expected_version):
     try:
         if regular_subtitle_version(path) != expected_version:
             raise SubtitleDestinationChanged('The previous subtitle changed during publication')
-        os.remove(path)
+        if retire:
+            os.remove(path)
     except OSError as error:
         _discard(backup)
         raise SubtitleDestinationChanged(f'Unable to retire the previous source subtitle: {error}') from error
@@ -373,18 +391,62 @@ def _retire_source_subtitle(path, expected_version):
     try:
         yield
     except BaseException:
-        try:
-            if not _restore_backup(backup, path):
-                logging.error('BAZARR could not restore %s because the path is occupied. Kept %s', path, backup)
-        except OSError:
-            logging.exception('BAZARR could not restore %s from %s', path, backup)
+        if regular_subtitle_version(path) == expected_version:
+            _discard(backup)
+        else:
+            _restore_upgrade_file(backup, path)
         raise
     else:
         _discard(backup)
 
 
+@contextmanager
+def _quarantine_upgrade_output(path, expected_version):
+    """Keep a generated sibling recoverable until its replacement commits."""
+    if regular_subtitle_version(path) != expected_version:
+        raise SubtitleDestinationChanged('A generated subtitle changed during publication')
+    fd, backup = tempfile.mkstemp(prefix=f'.bazarr-sync-obsolete-{path.name[:40]}-',
+                                 suffix='.bak', dir=path.parent)
+    os.close(fd)
+    try:
+        os.replace(path, backup)
+    except BaseException:
+        os.unlink(backup)
+        raise
+    try:
+        yield
+    except BaseException:
+        _restore_upgrade_file(backup, path)
+        raise
+
+
+def _prepare_upgrade_outputs(video_path, paths, ownership_index):
+    outputs = {}
+    vobsub_indexes = {}
+    for path in paths:
+        if is_sync_engine_output(path):
+            continue
+        for engine in SYNC_ENGINES:
+            output = engine_output_path(path, engine)
+            version = regular_subtitle_version(output)
+            if version is None or output in outputs:
+                continue
+            if output.suffix.lower() == '.sub':
+                if output.parent not in vobsub_indexes:
+                    with os.scandir(output.parent) as entries:
+                        vobsub_indexes[output.parent] = {entry.name.lower() for entry in entries
+                                                         if entry.name.lower().endswith('.idx')
+                                                         and entry.is_file(follow_symlinks=False)}
+                if is_vobsub_pair(output.name, vobsub_indexes[output.parent]):
+                    continue
+            if sync_output_owner_is_unique(video_path, output, ownership_index=ownership_index):
+                outputs[output] = version
+    return outputs
+
+
 def _write_source_download(video_path, destination, content, *, source, language, recheck_missing, is_upgrade,
-                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None):
+                           written_paths, on_publish, wanted_stamp=None, wanted_profile=None, upgrade=None,
+                           video_version=None):
     """Publish the actual provider-selected file only while its destination is still eligible."""
     from media_sources.indexer import SourcePublicationOwnerIndex
     from media_sources.translation import prepare_source_sidecars
@@ -410,54 +472,57 @@ def _write_source_download(video_path, destination, content, *, source, language
                 raise SubtitleDestinationChanged('The previous subtitle does not have one media owner')
         if not sync_output_owner_is_unique(video_path, destination, ownership_index=ownership_index):
             raise SubtitleDestinationChanged('The source subtitle destination does not have one media owner')
+        if old_path is not None:
+            paths = (old_path, destination) if remove_previous else (destination,)
+            return _prepare_upgrade_outputs(video_path, paths, ownership_index)
         if wanted_stamp is None and recheck_missing:
             return prepare_source_sidecars(source, ownership_index, written_paths)
         return None
 
     @contextmanager
-    def publication():
-        recheck_paths = (destination, old_path) if upgrade is not None else ()
-        # Register retirement inside the transaction and keep its backup until commit exits.
-        with ExitStack() as retirement:
-            with ownership_index.publication(source, prepare, destination=registry_destination,
-                                             recheck_paths=recheck_paths) as (
-                    current, connection, external_subtitles):
-                if current is None or current.path != video_path:
-                    raise SubtitleDestinationChanged('The source item moved or was removed')
-                overwrite = is_upgrade if upgrade is None else same_destination
-                if os.path.lexists(destination) and (not overwrite or regular_subtitle_version(destination) is None):
-                    raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
-                if upgrade is not None:
-                    if current.profile_id != source.profile_id or not upgrade.can_publish(current, target=connection):
-                        raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
-                elif wanted_stamp is not None:
-                    if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile,
-                                                      target=connection):
-                        raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
-                elif recheck_missing and language not in check_missing_languages_source(
-                        current, external_subtitles=external_subtitles, target=connection):
-                    raise SubtitleDestinationChanged('The source language is no longer missing')
-                if remove_previous:
-                    retirement.enter_context(subtitle_mutation(video_path, old_path, invalidate_outputs=False))
-                    retirement.enter_context(_retire_source_subtitle(old_path, upgrade.subtitle_version))
-                yield
-                if remove_previous:
-                    quarantine_sync_outputs_after_mutation(video_path, old_path, ownership_index)
+    def publication(files):
+        with ownership_index.publication(source, prepare, destination=registry_destination) as (
+                current, connection, prepared):
+            if current is None or current.path != video_path:
+                raise SubtitleDestinationChanged('The source item moved or was removed')
+            if video_version is not None and subtitle_source_version(video_path) != video_version:
+                raise SubtitleDestinationChanged('The media file changed while searching for subtitles')
+            overwrite = is_upgrade if upgrade is None else same_destination
+            if os.path.lexists(destination) and (not overwrite or regular_subtitle_version(destination) is None):
+                raise SubtitleDestinationChanged('The source subtitle destination is already occupied')
+            if upgrade is not None:
+                if current.profile_id != source.profile_id or not upgrade.can_publish(current, target=connection):
+                    raise SubtitleDestinationChanged('Source upgrade eligibility changed during search')
+                files.enter_context(subtitle_mutation(video_path, old_path, *prepared, invalidate_outputs=False))
+                files.enter_context(_preserve_source_subtitle(old_path, upgrade.subtitle_version, retire=remove_previous))
+                for output, version in prepared.items():
+                    files.enter_context(_quarantine_upgrade_output(output, version))
+            elif wanted_stamp is not None:
+                if not _wanted_source_can_publish(current, language, wanted_stamp, wanted_profile, target=connection):
+                    raise SubtitleDestinationChanged('Wanted source eligibility changed during search')
+            elif recheck_missing and language not in check_missing_languages_source(
+                    current, external_subtitles=prepared, target=connection):
+                raise SubtitleDestinationChanged('The source language is no longer missing')
+            yield
 
     try:
-        # Report a new filename only once the previous subtitle has been removed.
-        write_subtitle_file(video_path, destination, content,
-                            written_paths=None if remove_previous else written_paths,
-                            on_publish=None if remove_previous else on_publish,
-                            publication_guard=publication, ownership_index=ownership_index,
-                            rollback_new_on_guard_error=remove_previous)
+        with ExitStack() as files:
+            if upgrade is not None:
+                files.enter_context(subtitle_write_locks(video_path, destination, old_path))
+            write_subtitle_file(video_path, destination, content,
+                                written_paths=written_paths if upgrade is None else None,
+                                on_publish=on_publish if upgrade is None else None,
+                                publication_guard=partial(publication, files), ownership_index=ownership_index,
+                                rollback_new_on_guard_error=upgrade is not None,
+                                invalidate_outputs=upgrade is None)
     except SubtitleDestinationChanged as error:
         logging.info('BAZARR skipped saving a subtitle for source item %s: %s', source.item_id, error)
         return False
-    if remove_previous:
+    if upgrade is not None:
         written_paths.append(destination)
         _report_subtitle_publication(on_publish, destination)
-        _report_subtitle_publication(on_publish, old_path)
+        if remove_previous:
+            _report_subtitle_publication(on_publish, old_path)
     return True
 
 

@@ -182,19 +182,28 @@ def record_rows(db):
     return db.execute(sa.select(table.id, table.action, table.upgradedFromId).order_by(table.id)).all()
 
 
-@pytest.mark.parametrize('failure_step', ['remove old', 'publish new', 'commit guard'])
-def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, failure_step):
+@pytest.mark.parametrize(('failure_step', 'same_name'), [
+    ('remove old', False), ('publish new', False), ('commit guard', False), ('commit guard', True),
+])
+def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, failure_step, same_name):
     from media_sources.history import get_upgradable_source_subtitles
     from media_sources.indexer import index_item
     from subtitles import download, upgrade
 
+    from subtitles.tools.subsync_engines import engine_output_path
+
     context = pipeline._movie(world)
     media = Path(context.path)
-    original = media.with_suffix('.en.hi.srt')
     destination = media.with_suffix('.en.srt')
+    original = destination if same_name else media.with_suffix('.en.hi.srt')
     original.write_bytes(b'Old subtitle')
+    siblings = {engine_output_path(original, 'ffsubsync'): b'Generated original',
+                engine_output_path(destination, 'autosubsync'): b'Generated destination'}
+    for sibling, content in siblings.items():
+        sibling.write_bytes(content)
     index_item(context.item_id)
-    first = _history(world.db, world.source_id, context.item_id, media, original, language='en:hi')
+    first = _history(world.db, world.source_id, context.item_id, media, original,
+                     language='en' if same_name else 'en:hi')
     monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
     monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
     pipeline._download(monkeypatch)
@@ -216,9 +225,12 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
         return replace(source, target, *args, **kwargs)
 
     def fail_guard_commit(connection):
-        if destination.exists() and not original.exists() and not failures:
+        if destination.exists() and destination.read_bytes() == pipeline.CONTENT and not failures:
             failures.append('commit guard')
             guard_backups.extend(path.read_bytes() for path in media.parent.glob('.bazarr-replaced-*'))
+            guard_backups.extend(path.read_bytes() for path in media.parent.glob('.bazarr-sync-obsolete-*'))
+            assert all(not path.exists() for path in siblings)
+            assert not world.published
             raise sa.exc.OperationalError('COMMIT', None, OSError('Lost the connection during commit'))
 
     with monkeypatch.context() as failure:
@@ -246,18 +258,24 @@ def test_failed_source_replacement_leaves_upgrade_retryable(world, monkeypatch, 
 
     assert failures == [failure_step]
     if failure_step == 'commit guard':
-        assert guard_backups == [b'Old subtitle']
+        assert sorted(guard_backups) == sorted([b'Old subtitle', *siblings.values()])
     assert record_rows(world.db) == [(first, 1, None)]
     assert original.read_bytes() == b'Old subtitle'
-    assert not destination.exists()
+    if not same_name:
+        assert not destination.exists()
+    assert {path: path.read_bytes() for path in siblings} == siblings
     assert not list(media.parent.glob('.bazarr-replaced-*'))
+    assert not list(media.parent.glob('.bazarr-sync-obsolete-*'))
     assert not world.published
     assert get_upgradable_source_subtitles() == {first: None}
 
     upgrade.upgrade_source_subtitles(job_id=11)
     assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
     assert destination.read_bytes() == pipeline.CONTENT
-    assert not original.exists()
+    if not same_name:
+        assert not original.exists()
+    assert all(not path.exists() for path in siblings)
+    assert sorted(path.read_bytes() for path in media.parent.glob('.bazarr-sync-obsolete-*')) == sorted(siblings.values())
 
 
 def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(world, backend, monkeypatch):
@@ -269,6 +287,7 @@ def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(wo
     from media_sources.indexer import index_item
     from radarr.sync import movies
     from subtitles import download, upgrade
+    from subtitles.tools.subsync_engines import engine_output_path
 
     context = pipeline._movie(world)
     media = Path(context.path)
@@ -276,7 +295,10 @@ def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(wo
     original = folder / media.with_suffix('.en.hi.srt').name
     destination = folder / media.with_suffix('.en.srt').name
     arr_path = video(world.tmp_path / 'arr' / media.name)
+    siblings = (engine_output_path(original, 'ffsubsync'), engine_output_path(destination, 'ffsubsync'))
     original.write_bytes(b'Old subtitle')
+    for sibling in siblings:
+        sibling.write_bytes(b'Old generated subtitle')
     index_item(context.item_id)
     first = _history(world.db, world.source_id, context.item_id, media, original, language='en:hi')
     world.db.execute(sa.insert(TableArrInstances).values(
@@ -306,8 +328,8 @@ def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(wo
         finally:
             world.db.remove()
 
-    def observe_destination_swap(staged, target):
-        if Path(target) == destination:
+    def observe_generated_quarantine(staged, target):
+        if Path(staged) == siblings[0] and not start_insert.is_set():
             start_insert.set()
             assert insert_ready.wait(10)
             with engine.connect() as observer:
@@ -321,12 +343,12 @@ def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(wo
                     sleep(0.01)
         return replace(staged, target)
 
-    monkeypatch.setattr(download.os, 'replace', observe_destination_swap)
+    monkeypatch.setattr(download.os, 'replace', observe_generated_quarantine)
     with ThreadPoolExecutor(max_workers=1) as pool:
         writer = pool.submit(insert_movie)
         try:
             upgrade.upgrade_source_subtitles(job_id=10)
-            assert start_insert.is_set(), 'upgrade never reached the file swap'
+            assert start_insert.is_set(), 'upgrade never reached generated subtitle cleanup'
         finally:
             start_insert.set()
         writer.result(timeout=10)
@@ -336,6 +358,118 @@ def test_postgres_shared_upgrade_blocks_normal_arr_insert_through_publication(wo
     assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
     assert destination.read_bytes() == pipeline.CONTENT
     assert not original.exists()
+    assert all(not sibling.exists() for sibling in siblings)
+
+
+@pytest.mark.parametrize('folder_mode', ['absolute', 'relative'])
+def test_postgres_shared_upgrade_rechecks_a_concurrent_symlink_owner(world, backend, monkeypatch, folder_mode):
+    if backend != 'postgresql':
+        pytest.skip('PostgreSQL is needed to observe the Arr transaction holding its registry lock')
+
+    from app.config import settings
+    from app.database import TableArrInstances, TableMovies
+    from media_sources.history import get_upgradable_source_subtitles
+    from media_sources.indexer import index_item
+    from subtitles import upgrade
+    from subtitles.tools.subsync_engines import engine_output_path
+    from utilities.helper import get_target_folder
+
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    folder = world.root.parent / 'shared'
+    folder.mkdir()
+    monkeypatch.setattr(settings.general, 'subfolder', folder_mode)
+    monkeypatch.setattr(settings.general, 'subfolder_custom',
+                        str(folder) if folder_mode == 'absolute' else '../shared')
+    # The remote and mapped aliases both differ from the canonical media's basename.
+    other_media = video(folder.parent / 'arr' / media.name)
+    alias = other_media.with_name('Alias.mkv')
+    alias.symlink_to(other_media.name)
+    arr_path = '/movies/Alias.mkv'
+    destination = folder / media.with_suffix('.en.srt').name
+    original = Path(get_target_folder(str(media), create=False)) / media.with_suffix('.en.hi.srt').name
+    generated = engine_output_path(original, 'ffsubsync')
+    original.write_bytes(b'Old subtitle')
+    generated.write_bytes(b'Old generated subtitle')
+    index_item(context.item_id)
+    first = _history(world.db, world.source_id, context.item_id, media, original, language='en:hi')
+    assert get_upgradable_source_subtitles() == {first: None}
+    world.db.execute(sa.insert(TableArrInstances).values(
+        id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1,
+        path_mappings=json.dumps([['/movies', str(alias.parent)]])))
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+
+    inserted, lock_conflict = Event(), Event()
+    engine = world.db.get_bind()
+
+    def insert_owner():
+        with engine.connect().execution_options(isolation_level='READ COMMITTED') as connection:
+            with connection.begin():
+                connection.execute(sa.insert(TableMovies).values(
+                    id=73, arr_instance_id=42, radarrId=9000, title='Film', path=arr_path, tmdbId='73'))
+                inserted.set()
+                assert lock_conflict.wait(10)
+
+    def observe_lock_failure(error):
+        if 'IN SHARE MODE NOWAIT' in (error.statement or '') and error.original_exception.pgcode == '55P03':
+            lock_conflict.set()
+
+    sa.event.listen(engine, 'handle_error', observe_lock_failure)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            writer = pool.submit(insert_owner)
+            try:
+                assert inserted.wait(10)
+                upgrade.upgrade_source_subtitles(job_id=10)
+                assert lock_conflict.is_set()
+            finally:
+                lock_conflict.set()
+            writer.result(timeout=10)
+    finally:
+        sa.event.remove(engine, 'handle_error', observe_lock_failure)
+
+    assert world.db.scalar(sa.select(TableMovies.path)) == arr_path
+    assert record_rows(world.db) == [(first, 1, None)]
+    assert original.read_bytes() == b'Old subtitle'
+    assert generated.read_bytes() == b'Old generated subtitle'
+    assert not destination.exists()
+    assert not world.published
+
+
+def test_source_upgrade_leaves_another_videos_generated_name_alone(world, monkeypatch):
+    from app.database import TableArrInstances, TableMovies
+    from media_sources.indexer import index_item
+    from subtitles import upgrade
+    from subtitles.tools.subsync_engines import engine_output_path
+
+    context = pipeline._movie(world)
+    media = Path(context.path)
+    folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path)
+    original = folder / media.with_suffix('.en.srt').name
+    original.write_bytes(b'Old subtitle')
+    generated = engine_output_path(original, 'ffsubsync')
+    generated.write_bytes(b'Another movie subtitle')
+    unrelated = video(world.tmp_path / 'arr' / 'Other Film.mkv')
+    alias = unrelated.with_name(generated.with_suffix('.mkv').name)
+    alias.symlink_to(unrelated.name)
+    world.db.execute(sa.insert(TableArrInstances).values(
+        id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1))
+    world.db.execute(sa.insert(TableMovies).values(
+        id=73, arr_instance_id=42, radarrId=9000, title='Other', path=str(alias), tmdbId='73'))
+    index_item(context.item_id)
+    first = _history(world.db, world.source_id, context.item_id, media, original)
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+
+    upgrade.upgrade_source_subtitles(job_id=10)
+
+    assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
+    assert original.read_bytes() == pipeline.CONTENT
+    assert generated.read_bytes() == b'Another movie subtitle'
+    assert not list(folder.glob('.bazarr-sync-obsolete-*'))
 
 
 @pytest.mark.parametrize('change', [
