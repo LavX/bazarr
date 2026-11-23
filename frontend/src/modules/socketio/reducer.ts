@@ -21,6 +21,47 @@ function invalidateHiddenTracks(mediaType: HiddenTrackMediaType) {
   });
 }
 
+function invalidateSourceWanted() {
+  for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+    void queryClient.invalidateQueries({
+      queryKey: [kind, QueryKeys.Wanted],
+      predicate: ({ queryKey }) => {
+        const scope = queryKey[2];
+        return (
+          typeof scope === "object" &&
+          scope !== null &&
+          "includeSources" in scope &&
+          scope.includeSources === true
+        );
+      },
+    });
+  }
+  void queryClient.invalidateQueries({
+    queryKey: [QueryKeys.System, QueryKeys.Badges],
+  });
+  void queryClient.invalidateQueries({
+    queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", true],
+  });
+}
+
+function invalidateSourceLibrary() {
+  for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+    void queryClient.invalidateQueries({
+      queryKey: [kind, "library"],
+      predicate: ({ queryKey }) => {
+        const scope = queryKey[2];
+        return (
+          typeof scope === "object" &&
+          scope !== null &&
+          "includeSources" in scope &&
+          scope.includeSources === true
+        );
+      },
+    });
+  }
+  void queryClient.invalidateQueries({ queryKey: ["source-detail"] });
+}
+
 const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
 
 // The backend remembers 50 failed and 50 completed jobs beside the ones still
@@ -70,7 +111,10 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "sports",
       any: () => {
         void queryClient.invalidateQueries({ queryKey: [QueryKeys.Sports] });
-        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Badges] });
+        invalidateSourceWanted();
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", false],
+        });
         invalidateHiddenTracks("sports");
       },
     },
@@ -332,6 +376,17 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
         });
       },
+    },
+    {
+      key: "source-item",
+      any: () => {
+        invalidateSourceWanted();
+        invalidateSourceLibrary();
+      },
+    },
+    {
+      key: "source-group",
+      any: invalidateSourceLibrary,
     },
     {
       key: "reset-episode-wanted",

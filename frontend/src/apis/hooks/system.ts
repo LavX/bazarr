@@ -17,9 +17,12 @@ import { setAuthenticated } from "@/utilities/event";
 import { JobFailedError, JobStoppedError, waitForJob } from "@/utilities/jobs";
 
 export function useBadges() {
-  return useQuery({
-    queryKey: [QueryKeys.System, QueryKeys.Badges],
-    queryFn: () => api.badges.all(),
+  const { data: settings } = useSystemSettings();
+  const includeSources = settings?.media_sources?.visible === true;
+  return useQuery<Partial<Badge>>({
+    queryKey: [QueryKeys.System, QueryKeys.Badges, includeSources],
+    queryFn: () => api.badges.all(includeSources),
+    placeholderData: undefined,
     refetchOnWindowFocus: "always",
     refetchInterval: 1000 * 60,
     staleTime: 1000 * 10,
@@ -226,11 +229,18 @@ export function useSettingsMutation(
   });
 }
 
+function arrSearchResults(results: ItemSearchResult[]): ItemSearchResult[] {
+  return results.filter((item) => item.origin !== "source");
+}
+
 export function useServerSearch(query: string, enabled: boolean) {
+  const { data: settings } = useSystemSettings();
+  const includeSources = settings?.media_sources?.visible === true;
   return useQuery({
-    queryKey: [QueryKeys.System, QueryKeys.Search, query],
-    queryFn: () => api.system.search(query),
+    queryKey: [QueryKeys.System, QueryKeys.Search, query, includeSources],
+    queryFn: () => api.system.search(query, includeSources),
     enabled,
+    select: includeSources ? undefined : arrSearchResults,
   });
 }
 

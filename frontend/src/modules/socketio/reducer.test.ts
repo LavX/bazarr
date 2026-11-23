@@ -147,6 +147,52 @@ describe("socketio reducer", () => {
     },
   );
 
+  it("refreshes both Wanted lists and the navigation badge after a source save", () => {
+    reducerFor("source-item").any?.();
+
+    for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [kind, QueryKeys.Wanted],
+        predicate: expect.any(Function),
+      });
+    }
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Badges],
+    });
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.System, QueryKeys.Languages, "audio", true],
+    });
+  });
+
+  it.each(["source-item", "source-group"] as const)(
+    "refreshes source library and detail data after %s events",
+    (event) => {
+      reducerFor(event).any?.();
+      for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+        const options = queryClientMock.invalidateQueries.mock.calls
+          .map(([value]) => value)
+          .find(
+            (value) =>
+              value.queryKey[0] === kind && value.queryKey[1] === "library",
+          );
+        expect(options).toBeDefined();
+        expect(
+          options.predicate({
+            queryKey: [kind, "library", { includeSources: true }],
+          }),
+        ).toBe(true);
+        expect(
+          options.predicate({
+            queryKey: [kind, "library", { includeSources: false }],
+          }),
+        ).toBe(false);
+      }
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: ["source-detail"],
+      });
+    },
+  );
+
   it("invalidates the wanted series query for reset-episode-wanted events", () => {
     reducerFor("reset-episode-wanted").any?.();
 

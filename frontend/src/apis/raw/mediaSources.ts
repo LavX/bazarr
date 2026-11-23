@@ -100,6 +100,13 @@ class MediaSourcesApi extends BaseApi {
     return this.delete(`/${id}/libraries/${libraryId}`);
   }
 
+  async scanLibrary(sourceId: number, libraryId: number) {
+    const { data } = await this.postRaw<{ job_id?: number | null }>(
+      `/${sourceId}/libraries/${libraryId}/scan`,
+    );
+    return data.job_id ?? null;
+  }
+
   async scan(id: number) {
     const { data } = await this.postRaw<{ job_id?: number | null }>(
       `/${id}/scan`,

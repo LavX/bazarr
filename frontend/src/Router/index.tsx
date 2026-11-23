@@ -51,6 +51,10 @@ import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
 import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
+import {
+  SourceMovieDetailView,
+  SourceSeriesDetailView,
+} from "@/pages/SourceDetail";
 import Sports from "@/pages/Sports";
 import SportsEvents from "@/pages/SportsEvents";
 import SystemAnnouncementsView from "@/pages/System/Announcements";
@@ -83,6 +87,8 @@ export function useRoutes(): CustomRouteObject[] {
     series,
     movies,
     sports,
+    folderSeries,
+    folderMovies,
     seriesActivity,
     movieActivity,
     sportsActivity,
@@ -91,6 +97,8 @@ export function useRoutes(): CustomRouteObject[] {
     sonarrBadges,
     radarrBadges,
     sportarrBadges,
+    folderSeriesSearchable,
+    folderMoviesSearchable,
   } = useMediaNavigation();
   // The Translation page exists only while the v2 translation runtime is on.
   const translationRuntime = useTranslationRuntime();
@@ -121,10 +129,14 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 index: true,
                 element: (
-                  <ArrMediaRoute kind="sonarr">
+                  <ArrMediaRoute kind="sonarr" sourceBrowsable={folderSeries}>
                     <SeriesView />
                   </ArrMediaRoute>
                 ),
+              },
+              {
+                path: "source/:id",
+                element: <SourceSeriesDetailView />,
               },
               {
                 path: ":id",
@@ -146,10 +158,14 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 index: true,
                 element: (
-                  <ArrMediaRoute kind="radarr">
+                  <ArrMediaRoute kind="radarr" sourceBrowsable={folderMovies}>
                     <MovieView />
                   </ArrMediaRoute>
                 ),
+              },
+              {
+                path: "source/:id",
+                element: <SourceMovieDetailView />,
               },
               {
                 path: ":id",
@@ -232,9 +248,15 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 name: "Episodes",
                 path: "series",
-                badge: sonarrBadges ? data?.episodes : undefined,
+                badge: sonarrBadges
+                  ? data?.episodes
+                  : folderSeriesSearchable
+                    ? data?.source_episodes
+                    : undefined,
                 hidden: !seriesActivity,
-                element: (
+                element: folderSeries ? (
+                  <WantedSeriesView />
+                ) : (
                   <ArrMediaRoute kind="sonarr">
                     <WantedSeriesView />
                   </ArrMediaRoute>
@@ -243,9 +265,15 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 name: "Movies",
                 path: "movies",
-                badge: radarrBadges ? data?.movies : undefined,
+                badge: radarrBadges
+                  ? data?.movies
+                  : folderMoviesSearchable
+                    ? data?.source_movies
+                    : undefined,
                 hidden: !movieActivity,
-                element: (
+                element: folderMovies ? (
+                  <WantedMoviesView />
+                ) : (
                   <ArrMediaRoute kind="radarr">
                     <WantedMoviesView />
                   </ArrMediaRoute>
@@ -269,7 +297,9 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "series",
                 name: "Episodes",
                 hidden: !seriesActivity,
-                element: (
+                element: seriesActivity ? (
+                  <BlacklistSeriesView />
+                ) : (
                   <ArrMediaRoute kind="sonarr">
                     <BlacklistSeriesView />
                   </ArrMediaRoute>
@@ -279,7 +309,9 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "movies",
                 name: "Movies",
                 hidden: !movieActivity,
-                element: (
+                element: movieActivity ? (
+                  <BlacklistMoviesView />
+                ) : (
                   <ArrMediaRoute kind="radarr">
                     <BlacklistMoviesView />
                   </ArrMediaRoute>
@@ -530,6 +562,8 @@ export function useRoutes(): CustomRouteObject[] {
     [
       data?.episodes,
       data?.movies,
+      data?.source_episodes,
+      data?.source_movies,
       data?.sports,
       data?.providers,
       data?.sonarr_signalr,
@@ -540,6 +574,8 @@ export function useRoutes(): CustomRouteObject[] {
       series,
       movies,
       sports,
+      folderSeries,
+      folderMovies,
       seriesActivity,
       movieActivity,
       sportsActivity,
@@ -548,6 +584,8 @@ export function useRoutes(): CustomRouteObject[] {
       sonarrBadges,
       radarrBadges,
       sportarrBadges,
+      folderSeriesSearchable,
+      folderMoviesSearchable,
       translationRuntime,
     ],
   );

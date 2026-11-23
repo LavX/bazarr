@@ -55,13 +55,42 @@ def subtitle_write_lock(video_path, subtitle_directory):
         return lock
 
 
+def _subtitle_file_version(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 def subtitle_source_version(path):
     """Identify the saved file a queued upload sync is allowed to replace."""
     try:
-        stat = os.stat(path)
+        return _subtitle_file_version(os.stat(path))
     except OSError:
         return None
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def regular_subtitle_version(path):
+    """Identify the directory entry only when it is an ordinary file."""
+    try:
+        entry = os.lstat(path)
+    except OSError:
+        return None
+    return _subtitle_file_version(entry) if stat.S_ISREG(entry.st_mode) else None
+
+
+def read_regular_subtitle(path, expected_version, *, max_bytes=None):
+    """Read the same ordinary file the caller approved, without waiting on a stream."""
+    if expected_version is None or regular_subtitle_version(path) != expected_version:
+        raise SubtitleSourceChanged('The subtitle input is no longer an approved regular file')
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or _subtitle_file_version(opened) != expected_version
+                or regular_subtitle_version(path) != expected_version):
+            raise SubtitleSourceChanged('The subtitle input changed before it was opened')
+        with open(descriptor, 'rb', closefd=False) as handle:
+            return handle.read() if max_bytes is None else handle.read(max_bytes)
+    finally:
+        os.close(descriptor)
 
 
 class SubtitlePublication:
@@ -158,7 +187,7 @@ def subtitle_write_locks(video_path, *paths, cancel=None):
 
 
 @contextmanager
-def subtitle_mutation(video_path, *paths, invalidate_outputs=True):
+def subtitle_mutation(video_path, *paths, invalidate_outputs=True, ownership_index=None):
     """Coordinate exact local writes and invalidate pending publications.
 
     Network and engine work stays outside. Indexers share this coordinator for
@@ -174,14 +203,17 @@ def subtitle_mutation(video_path, *paths, invalidate_outputs=True):
                     directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
                     states[directory].changed(path)
                     if invalidate_outputs:
-                        quarantine_sync_outputs_after_mutation(video_path, path)
+                        if ownership_index is None:
+                            quarantine_sync_outputs_after_mutation(video_path, path)
+                        else:
+                            quarantine_sync_outputs_after_mutation(video_path, path, ownership_index)
 
 
 @contextmanager
 def staged_subtitle_write(video_path, destination, before_publish=None, allow_empty=False,
                           source_paths=(), after_publish=None, on_publish=None,
                           publication_guard=None, cancel=None, expected_versions=(),
-                          after_write=None):
+                          after_write=None, ownership_index=None):
     """Compute privately, then publish only while source and destination are current."""
     with subtitle_write_locks(video_path, destination, *source_paths,
                               **({} if cancel is None else {'cancel': cancel})) as states:
@@ -203,7 +235,8 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
             raise OSError('Subtitle writer did not produce a nonempty file')
         with subtitle_write_locks(video_path, destination, *source_paths,
                                   **({} if cancel is None else {'cancel': cancel})):
-            with subtitle_mutation(video_path, destination):
+            with subtitle_mutation(video_path, destination,
+                                   **({'ownership_index': ownership_index} if ownership_index is not None else {})):
                 with publication_guard() if publication_guard is not None else nullcontext():
                     validate_subtitle_versions(expected_versions)
                     if before_publish:
@@ -262,12 +295,14 @@ def validate_subtitle_versions(snapshots):
 
 
 def write_subtitle_file(video_path, destination, content, written_paths=None,
-                        on_publish=None, publication_guard=None, after_write=None):
+                        on_publish=None, publication_guard=None, after_write=None, ownership_index=None):
     """Write one saver output atomically and record that exact successful path."""
     with staged_subtitle_write(video_path, destination, on_publish=on_publish,
                               publication_guard=publication_guard, after_write=after_write,
                               after_publish=(lambda: written_paths.append(destination))
-                              if written_paths is not None else None) as temporary:
+                              if written_paths is not None else None,
+                              **({'ownership_index': ownership_index} if ownership_index is not None else {})
+                              ) as temporary:
         with open(temporary, 'wb') as handle:
             handle.write(content)
 
@@ -343,14 +378,10 @@ class SyncOutputOwnerIndex:
     @staticmethod
     def _load_owners():
         from app.database import database, select, TableEpisodes, TableMovies, TableSportsEvents, TableArrInstances
-        from app.config import settings
+        from utilities.helper import get_target_folder
         from utilities.path_mappings import path_mappings
         from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
-        subfolder = settings.general.subfolder
-        custom_folder = settings.general.subfolder_custom
-        absolute_folder = (os.path.normcase(os.path.realpath(custom_folder))
-                           if subfolder == 'absolute' else None)
         owners = {}
         for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie'),
                                   (TableSportsEvents, 'sports')):
@@ -368,16 +399,20 @@ class SyncOutputOwnerIndex:
                                if media_type == 'sports' else path_mappings.path_replace_instance(
                                    row.path, row.arr_instance_id, media_type))
                 mapped = os.path.normcase(os.path.realpath(mapped_path))
-                folders = {os.path.dirname(mapped)}
-                if subfolder == 'absolute':
-                    folders.add(absolute_folder)
-                elif subfolder == 'relative':
-                    folders.add(os.path.normcase(os.path.realpath(os.path.join(
-                        os.path.dirname(mapped), custom_folder))))
-                stem = _normalized_media_stem(mapped)
+                folders = {os.path.normcase(os.path.realpath(os.path.dirname(mapped_path)))}
+                custom_folder = get_target_folder(mapped_path, create=False)
+                if custom_folder:
+                    folders.add(os.path.normcase(os.path.realpath(custom_folder)))
+                stem = _normalized_media_stem(mapped_path)
                 for folder in folders:
                     owners.setdefault((folder, stem), set()).add(mapped)
         return owners
+
+    def folder_is_shared(self, directory):
+        return False
+
+    def conflicting_stems(self, video, subtitle_path):
+        return {_normalized_media_stem(video), _normalized_media_stem(subtitle_path)}
 
     def is_unique(self, video, directory, conflicting_stems):
         if not self._loaded:
@@ -402,20 +437,26 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
 
     video = os.path.normcase(os.path.realpath(video_path))
     directory = os.path.normcase(os.path.realpath(os.path.dirname(source_path)))
-    media_directory = os.path.dirname(video)
+    media_directory = os.path.normcase(os.path.realpath(os.path.dirname(video_path)))
 
     stem = _normalized_media_stem
-    if stem(source_path) != stem(video) and not stem(source_path).startswith(stem(video) + '.'):
+    # Sidecars follow the admitted filename, even when it is a symlink with a
+    # different target name. Physical paths identify owners, never sidecar names.
+    if stem(source_path) != stem(video_path) and not stem(source_path).startswith(stem(video_path) + '.'):
         return False
-    conflicting_stems = {stem(video), stem(source_path)}
+    conflicting_stems = (ownership_index.conflicting_stems(video_path, source_path) if ownership_index is not None
+                         else {stem(video_path), stem(source_path)})
     try:
         with os.scandir(media_directory) as entries:
-            local_videos = {os.path.normcase(os.path.realpath(entry.path)) for entry in entries
+            local_videos = {(stem(entry.path), os.path.normcase(os.path.realpath(entry.path))) for entry in entries
                             if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS)}
-        if any(path != video and stem(path) in conflicting_stems for path in local_videos):
+        if (stem(video_path), video) not in local_videos:
             return False
-        if directory == media_directory:
-            return video in local_videos
+        if any(path != video and name in conflicting_stems for name, path in local_videos):
+            return False
+        if directory == media_directory and (ownership_index is None or not ownership_index.folder_is_shared(
+                directory)):
+            return True
 
         # Separate media directories can share a custom subtitle folder. Keep
         # all mapped owners, amortizing that lookup only within an explicit scan.

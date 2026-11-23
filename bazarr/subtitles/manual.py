@@ -14,7 +14,7 @@ from subtitles.tools.subsync_engines import subtitle_write_locks, write_subtitle
 from subliminal_patch.core_persistent import list_all_subtitles, download_subtitles
 from subliminal_patch.score import compute_score, DEFAULT_SCORES
 
-from languages.get_languages import alpha3_from_alpha2
+from languages.get_languages import alpha3_from_alpha2, get_language_set
 from app.config import settings
 from utilities.helper import get_target_folder, force_unicode
 from utilities.path_mappings import path_mappings
@@ -41,7 +41,7 @@ from .search_result import marshal_search_results
 @update_pools
 def manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
                   language_set=None, original_format=False, cancel=None, arr_instance_id=None, observed=True,
-                  provider_outcomes=None):
+                  provider_outcomes=None, source=None):
     logging.debug(f'BAZARR Manually searching subtitles for this file: {path}')  # noqa: G004
 
     if not observed:
@@ -50,19 +50,19 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type, *, 
         return _manual_search(path, profile_id, providers, sceneName, title, media_type,
                               context=context, language_set=language_set,
                               original_format=original_format, cancel=cancel,
-                              arr_instance_id=arr_instance_id, provider_outcomes=provider_outcomes)
+                              arr_instance_id=arr_instance_id, provider_outcomes=provider_outcomes, source=source)
 
+    publication_type = source.publication_type if source is not None else ('episode' if media_type == 'series' else 'movie')
     # A manual search that answers a request runs on the request thread and
     # never enters the jobs queue, so without this observation it is invisible
     # to any status reader while it is the only thing the server is actually
     # doing.
     with activity.observed_operation('manual_search', scope_kind='media',
-                                     media_type='episode' if media_type == 'series' else 'movie',
-                                     title=title):
+                                     media_type=publication_type, title=title):
         return _manual_search(path, profile_id, providers, sceneName, title, media_type,
                               context=context, language_set=language_set,
                               original_format=original_format, cancel=cancel,
-                              arr_instance_id=arr_instance_id, provider_outcomes=provider_outcomes)
+                              arr_instance_id=arr_instance_id, provider_outcomes=provider_outcomes, source=source)
 
 
 class _Stopped(Exception):
@@ -109,7 +109,7 @@ class _JobStop:
 
 def _manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
                    language_set=None, original_format=False, cancel=None, arr_instance_id=None,
-                   provider_outcomes=None):
+                   provider_outcomes=None, source=None):
     final_subtitles = []
 
     outcomes = {}
@@ -135,20 +135,36 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
                 status = 'failed'
             outcomes[result.provider] = dict(name=result.provider, status=status, results=0)
 
-    pool = _get_pool(media_type, profile_id, context=context) if context is not None else _get_pool(media_type, profile_id)
-
+    video_args = {}
+    if source is not None:
+        video_args['source'] = source
     if context is not None:
+        video_args['context'] = context
+    pool = _get_pool(media_type, profile_id, **video_args)
+    if context is not None:
+        video_args['cancel'] = cancel
+
+    signature = None
+    if source is not None:
+        from media_sources.analysis import local_content_stamp
+        signature = local_content_stamp(source.path)
+        if signature is None:
+            return []
+    elif context is not None:
         from sportarr.subtitles import candidate_signature
         signature = candidate_signature(context)
     if language_set is None:
-        language_set, original_format = _get_language_obj(profile_id=profile_id)
+        if source is not None and (profile_id is None or not get_profiles_list(profile_id=profile_id)):
+            language_set = get_language_set()
+        else:
+            language_set, original_format = _get_language_obj(profile_id=profile_id)
     also_forced = any([x.forced for x in language_set])
     forced_required = all([x.forced for x in language_set])
     normal = not also_forced and not forced_required and all([not x.hi for x in language_set])
 
     if providers:
         video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type,
-                          **({'context': context, 'cancel': cancel} if context is not None else {}))
+                          **video_args)
     else:
         logging.info("BAZARR All providers are throttled")
         return 'All providers are throttled'
@@ -161,7 +177,9 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
         try:
             if providers:
                 minimum_score = settings.general.minimum_score
-                minimum_score_movie = settings.general.minimum_score_movie
+                minimum_score_movie = (settings.general.minimum_score_sports
+                                       if source is not None and source.kind == 'sports_event'
+                                       else settings.general.minimum_score_movie)
                 min_score, _, _ = _get_scores(media_type, minimum_score_movie, minimum_score)
                 subtitles = list_all_subtitles([video], language_set, pool, min_score=int(min_score),
                                                cancel=_stop_check(cancel),
@@ -247,7 +265,7 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
                          language=str(s.language.basename),
                          hearing_impaired=str(s.hearing_impaired),
                          provider=s.provider_name,
-                         subtitle=_cache_search_result(s, context, signature if context is not None else None),
+                         subtitle=_cache_search_result(s, context, signature, source),
                          url=s.page_link,
                          original_format=s.use_original_format,
                          matches=list(matches),
@@ -274,7 +292,7 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
     return final_subtitles
 
 
-def queue_manual_search(path, profile_id, scene_name, title, media_type, label, arr_instance_id=None):
+def queue_manual_search(path, profile_id, scene_name, title, media_type, label, arr_instance_id=None, *, source=None):
     """Queue a manual search as a standard job and start it at once.
 
     A person pressing Search is waiting, so the job does not queue behind a
@@ -289,19 +307,26 @@ def queue_manual_search(path, profile_id, scene_name, title, media_type, label, 
     job_id = jobs_queue.feed_jobs_pending_queue(
         job_name=f"Searching subtitles for {label}", module=__name__, func="run_manual_search_job",
         kwargs={"path": path, "profile_id": profile_id, "scene_name": scene_name, "title": title,
-                "media_type": media_type, "arr_instance_id": arr_instance_id},
+                "media_type": media_type, "arr_instance_id": arr_instance_id,
+                **({"source": source} if source is not None else {})},
         is_progress=True, progress_max=2, retryable=False, return_existing=True,
         lane=USER_SEARCH_LANE)
     Thread(target=jobs_queue.force_start_pending_job, args=(job_id, True), daemon=True).start()
     return job_id
 
 
-def run_manual_search_job(path, profile_id, scene_name, title, media_type, arr_instance_id=None, job_id=None):
+def run_manual_search_job(path, profile_id, scene_name, title, media_type, arr_instance_id=None, job_id=None, *, source=None):
     """The job body: list the providers for one file and publish what they offered."""
     from app.get_providers import get_providers_sorted
 
+    if source is not None:
+        from media_sources.manual import current_manual_source, source_search_title
+        source = current_manual_source(source)
+        path, profile_id, scene_name = source.path, source.profile_id, str(source.scene_name)
+        title = source_search_title(source)
+    publication_type = source.publication_type if source is not None else ('episode' if media_type == 'series' else 'movie')
     activity.register(activity.activity_id_for_job(job_id), operation='manual_search', scope_kind='media',
-                      media_type='episode' if media_type == 'series' else 'movie', title=title)
+                      media_type=publication_type, title=title)
     jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=2,
                                    progress_message="Searching the providers")
     # The job's own stop, read before and while each provider answers, so Stop ends the search at the
@@ -309,7 +334,7 @@ def run_manual_search_job(path, profile_id, scene_name, title, media_type, arr_i
     provider_outcomes = []
     found = manual_search(path, profile_id, get_providers_sorted(), scene_name, title, media_type,
                           arr_instance_id=arr_instance_id, observed=False, cancel=_JobStop(job_id),
-                          provider_outcomes=provider_outcomes)
+                          provider_outcomes=provider_outcomes, **({'source': source} if source is not None else {}))
     if isinstance(found, str):
         # The search says why it could not run as its return value.
         logging.warning("Manual search failed: reason=providers_unavailable title=%s: %s", title, found)
@@ -323,7 +348,8 @@ def run_manual_search_job(path, profile_id, scene_name, title, media_type, arr_i
 
 @update_pools
 def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provider, sceneName, title, media_type,
-                             use_original_format, profile_id, job_id=None, arr_instance_id=None, *, context=None, cancel=None):
+                             use_original_format, profile_id, job_id=None, arr_instance_id=None, *, context=None, cancel=None,
+                             source=None):
     logging.debug(f'BAZARR Manually downloading Subtitles for this file: {path}')  # noqa: G004
 
     if settings.general.utf8_encode:
@@ -336,8 +362,23 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
         logging.error("BAZARR Subtitle not found in cache (expired or invalid ID)")
         raise JobFailed('The search result has expired. Search again and pick the subtitle from the new '
                                'results.')
+    from media_sources.manual import SourceCandidate
     from sportarr.subtitles import SportsCandidate, validate_candidate
-    if context is not None:
+
+    source_candidate = None
+    if source is not None:
+        from copy import deepcopy
+        from media_sources.manual import validate_source_candidate
+
+        source_candidate = subtitle
+        subtitle = deepcopy(validate_source_candidate(source_candidate, source, provider))
+        # Provider download errors need the source owner before the call, including
+        # cached candidates whose provider never attached it during listing.
+        subtitle.source_context = source
+        subtitle.arr_instance_id = None
+    elif isinstance(subtitle, SourceCandidate):
+        raise JobFailed('This search result belongs to a media source item. Search again.')
+    elif context is not None:
         from copy import deepcopy
         candidate = subtitle
         validate_candidate(candidate, context, cancel=cancel)
@@ -364,15 +405,20 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
     # ids, so it names the instance this download is for.
     if arr_instance_id is not None:
         subtitle.arr_instance_id = arr_instance_id
-    video = get_video(force_unicode(path), title, sceneName, providers={provider}, media_type=media_type,
-                      **({'context': context, 'cancel': cancel} if context is not None else {}))
+    video_args = {}
+    pool_args = {}
+    if source is not None:
+        video_args['source'] = pool_args['source'] = source
+    if context is not None:
+        video_args.update(context=context, cancel=cancel)
+        pool_args['context'] = context
+    video = get_video(force_unicode(path), title, sceneName, providers={provider}, media_type=media_type, **video_args)
     if not video:
         raise JobFailed(f'Could not read the video file {path}. Check that it exists and that the path '
                                f'mapping is right.')
     try:
         if provider:
-            download_subtitles([subtitle], _get_pool(media_type, profile_id, context=context)
-                               if context is not None else _get_pool(media_type, profile_id))
+            download_subtitles([subtitle], _get_pool(media_type, profile_id, **pool_args))
             logging.debug(f'BAZARR Subtitles file downloaded for this file: {path}')  # noqa: G004
         else:
             logging.info("BAZARR All providers are throttled")
@@ -400,21 +446,27 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
             with subtitle_write_locks(path, os.path.join(get_target_folder(path) or os.path.dirname(path), '.destination')):
                 saved_subtitles = _save_downloaded_subtitles(
                     video, subtitle, path,
-                    on_publish=publication_callback(media_type, path, 'download', arr_instance_id))
+                    on_publish=publication_callback(media_type, path, 'download', arr_instance_id,
+                                                    **({'source': source} if source is not None else {})),
+                    **({'source': source, 'source_candidate': source_candidate} if source is not None else {}))
 
+        except JobFailed:
+            raise
         except Exception as e:
             logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
             raise JobFailed(f'Saving the subtitle to disk failed: {e}') from e
         else:
             if saved_subtitles:
-                clear_mismatch_after_manual_save(video, media_type, saved_subtitles,
-                                                 arr_instance_id)
+                if source is None:
+                    clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_instance_id)
                 _, max_score, _ = _get_scores(media_type)
                 for saved_subtitle in saved_subtitles:
                     processed_subtitle = process_subtitle(subtitle=saved_subtitle, media_type=media_type,
                                                           audio_language=audio_language, is_upgrade=False,
                                                           is_manual=True, path=path, max_score=max_score,
-                                                          job_id=job_id, arr_instance_id=arr_instance_id)
+                                                          job_id=job_id, arr_instance_id=arr_instance_id,
+                                                          **({'source': source, 'auto_translate': False}
+                                                             if source is not None else {}))
                     if processed_subtitle:
                         return processed_subtitle
                     else:
@@ -614,21 +666,28 @@ def clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_ins
         clear_mismatch_for_video(video, media_type, language, arr_instance_id=arr_instance_id)
 
 
-def _cache_search_result(subtitle, context=None, signature=None):
-    if context is not None:
+def _cache_search_result(subtitle, context=None, signature=None, source=None):
+    if source is not None:
+        from media_sources.manual import SourceCandidate
+        subtitle = SourceCandidate(source, subtitle, signature)
+    elif context is not None:
         from sportarr.subtitles import bind_candidate
         subtitle = bind_candidate(context, subtitle, signature)
     return subtitle_cache.store(subtitle)
 
 
 def _save_downloaded_subtitles(video, subtitle, path, validate=None, publication_guard=None,
-                               written_paths=None, on_publish=None):
+                               written_paths=None, on_publish=None, source=None, source_candidate=None):
     """Publish provider bytes using the common format, naming and atomic writer."""
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith('win') and settings.general.chmod_enabled else None
     written_paths = [] if written_paths is None else written_paths
     def write(destination, content):
         if validate is not None:
             validate(destination)
+        if source is not None:
+            from media_sources.manual import write_source_subtitle
+            return write_source_subtitle(source, destination, content, written_paths=written_paths,
+                                         on_publish=on_publish, candidate=source_candidate)
         return write_subtitle_file(path, destination, content, written_paths=written_paths,
                                    on_publish=on_publish,
                                    **({'publication_guard': publication_guard} if publication_guard is not None else {}))

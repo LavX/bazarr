@@ -13,7 +13,10 @@ from subtitles.mass_download import movies_download_subtitles
 from api.queued_job import queued_job_model, queued_job_response
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
-from api.utils import authenticate, None_Keys, postprocess, lowest_subtitle_scores
+from api.utils import authenticate, None_Keys, lowest_subtitle_scores
+from media_sources import repository
+from media_sources.library_rows import library_page, library_row, library_row_fields, movie_rows
+from media_sources.union import SourceKeyFilter, add_source_arguments, includes_sources
 
 api_ns_movies = Namespace('Movies', description='List movies metadata, update movie languages profile or run actions '
                                                 'for specific movies.')
@@ -30,6 +33,10 @@ class Movies(Resource):
                                     help='Canonical local movie IDs (#156; preferred, unique across instances)')
     get_request_parser.add_argument('scores', type=inputs.boolean, required=False, default=False,
                                     help='Add lowest_subtitle_score per movie (opt-in; absent = unchanged response)')
+
+    add_source_arguments(get_request_parser)
+    get_request_parser.add_argument('needs_attention', type=inputs.boolean, location='args', default=False,
+                                    help='Only source rows with unresolved identity or no effective profile')
 
     get_subtitles_model = api_ns_movies.model('subtitles_model', subtitles_model)
     get_subtitles_language_model = api_ns_movies.model('subtitles_language_model', subtitles_language_model)
@@ -75,6 +82,10 @@ class Movies(Resource):
         'total': fields.Integer(),
     })
 
+    mixed_data_model = api_ns_movies.clone('movies_mixed_data', data_model, library_row_fields)
+    mixed_data_model_with_scores = api_ns_movies.clone(
+        'movies_mixed_data_scores', data_model_with_scores, library_row_fields)
+
     @authenticate
     @api_ns_movies.doc(parser=get_request_parser)
     @api_ns_movies.response(200, 'Success')
@@ -87,6 +98,14 @@ class Movies(Resource):
         radarrId = args.get('radarrid[]')
         localId = args.get('id[]')
         scores = args.get('scores')
+        needs_attention = args.get('needs_attention')
+        owner_filter = SourceKeyFilter(tuple(args.get('source_key[]') or ()))
+        explicit_ids = bool(localId or radarrId)
+        source_table = repository.Items
+        mixed = (not explicit_ids and args.get('sources') == '1' and includes_sources(
+            args, database, source_table, source_table.c.kind == 'movie'))
+        if needs_attention and not mixed:
+            return {'data': [], 'total': 0}
 
         stmt = select(TableMovies.id,
                       TableMovies.arr_instance_id,
@@ -116,48 +135,36 @@ class Movies(Resource):
         elif len(radarrId) != 0:
             stmt = stmt.where(TableMovies.radarrId.in_(radarrId))
 
-        if length > 0:
-            stmt = stmt.limit(length).offset(start)
-
-        rows = database.execute(stmt).all()
-        results = [postprocess({
-            'id': x.id,
-            'arr_instance_id': x.arr_instance_id,
-            'alternativeTitles': x.alternativeTitles,
-            'audio_language': x.audio_language,
-            'fanart': x.fanart,
-            'imdbId': x.imdbId,
-            'missing_subtitles': x.missing_subtitles,
-            'monitored': x.monitored,
-            'overview': x.overview,
-            'path': x.path,
-            'poster': x.poster,
-            'profileId': x.profileId,
-            'radarrId': x.radarrId,
-            'sceneName': x.sceneName,
-            'subtitles': x.subtitles,
-            'tags': x.tags,
-            'title': x.title,
-            'year': x.year,
-        }) for x in rows]
-
-        count = database.execute(
-            select(func.count())
-            .select_from(TableMovies)) \
-            .scalar()
+        if owner_filter.keys:
+            stmt = stmt.where(owner_filter.arr(TableMovies.arr_instance_id))
+        if mixed:
+            rows, count = library_page(database, stmt, movie_rows(owner_filter), TableMovies.sortTitle,
+                                       start=start, length=length, needs_attention=needs_attention)
+        else:
+            count_query = select(func.count()).select_from(TableMovies)
+            if owner_filter.keys:
+                count_query = select(func.count()).select_from(stmt.order_by(None).subquery())
+            if length > 0:
+                stmt = stmt.limit(length).offset(start)
+            rows = database.execute(stmt).all()
+            count = database.execute(count_query).scalar()
+        results = [library_row(row, mixed) for row in rows]
 
         if scores:
-            # One extra grouped/ordered history query for the page's movies; the
-            # lowest current-subtitle score per movie is aggregated in Python.
-            score_map = lowest_subtitle_scores(database, {x.id: x.subtitles for x in rows},
+            arr_rows = [row for row in rows if not mixed or row.origin == 'arr']
+            score_map = lowest_subtitle_scores(database, {x.id: x.subtitles for x in arr_rows},
                                                TableHistoryMovie.movie_id, TableHistoryMovie,
-                                               videos_by_id={x.id: (x.path, x.arr_instance_id) for x in rows},
-                                               media_type='movie')
+                                               videos_by_id={x.id: (x.path, x.arr_instance_id) for x in arr_rows},
+                                               media_type='movie') if arr_rows else {}
             for item in results:
-                item['lowest_subtitle_score'] = score_map.get(item['id'])
-            return marshal({'data': results, 'total': count}, self.get_response_model_with_scores)
+                item['lowest_subtitle_score'] = score_map.get(item['id']) if item.get('origin') != 'source' else None
 
-        return marshal({'data': results, 'total': count}, self.get_response_model)
+        if mixed:
+            model = self.mixed_data_model_with_scores if scores else self.mixed_data_model
+            response_model = {**self.get_response_model, 'data': fields.Nested(model)}
+        else:
+            response_model = self.get_response_model_with_scores if scores else self.get_response_model
+        return marshal({'data': results, 'total': count}, response_model)
 
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('radarrid', type=int, action='append', required=False, default=[],
@@ -250,6 +257,8 @@ class Movies(Resource):
     patch_request_parser.add_argument('radarrid', type=int, required=False, help='Radarr movie ID')
     patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                       help='Owning Radarr instance id (#156)')
+    patch_request_parser.add_argument('sources', type=int, required=False,
+                                      help='Set to 1 to include media sources in Search All')
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
@@ -279,7 +288,14 @@ class Movies(Resource):
             else:
                 return '', 204
         elif action == "search-wanted":
-            wanted_search_missing_subtitles_movies()
+            from media_sources.wanted import arr_wanted_condition, queue_wanted_search
+
+            source_job = queue_wanted_search('movie') if args.get("sources") == 1 else None
+            if not source_job:
+                wanted_search_missing_subtitles_movies()
+            elif database.scalar(select(select(TableMovies.id).where(
+                    arr_wanted_condition('radarr', TableMovies.arr_instance_id)).exists())):
+                wanted_search_missing_subtitles_movies(active_owners_only=True)
             return '', 204
         elif action == "scan-wanted":
             wanted_scan_subtitles_movies()
