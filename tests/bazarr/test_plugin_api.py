@@ -1303,7 +1303,12 @@ def test_failed_update_keeps_the_source_detached_after_catalog_replacement(commu
     ("v2.7.0", False), ("v2.7.2", False), ("v2.7.2", True),
     ("replaced-url-active-only", False), ("replaced-url", False), ("replaced-url", True),
     ("new-registration", False), ("new-registration", True),
-])
+] + [(binding, store_first) for binding in (
+    "omitted-url-match", "omitted-url-match-active-only", "omitted-url-no-cache", "omitted-url-unusable-cache",
+    "omitted-url-wrong-url", "omitted-url-other-source", "omitted-url-other-plugin", "omitted-url-other-version",
+    "omitted-url-manifest-mismatch", "omitted-url-conflicting-cache", "omitted-url-stale-commit",
+    "omitted-url-unchecked-source", "omitted-url-detached",
+) for store_first in (False, True)])
 def test_legacy_catalog_binding_requires_matching_evidence(
         client, rollback_store, hub_store, hub_engine, monkeypatch, binding, store_first):  # noqa: F811
     from migrations.versions.c3e8a1f5b972_provider_hub_releases import move_state_into_releases
@@ -1330,25 +1335,65 @@ def test_legacy_catalog_binding_requires_matching_evidence(
         interpreter.parent.mkdir(parents=True)
         interpreter.touch()
         interpreters.append(str(interpreter))
-    unsupported = binding.startswith("replaced-url") or binding == "new-registration"
-    pending = binding != "replaced-url-active-only"
+    omitted_url = binding.startswith("omitted-url-")
+    unsupported = (binding.startswith("replaced-url") or binding == "new-registration"
+                   or (omitted_url and not binding.startswith("omitted-url-match")))
+    pending = not binding.endswith("active-only")
     if binding.startswith("replaced-url"):
         source["url"] = "https://github.com/example/replacement-catalog/blob/main/catalog.json"
         source.update(last_checked_at="2026-11-22T00:00:00Z", resolved_commit=staged["source"]["commit"])
     if binding == "new-registration":
         source["registration"] = "current-registration"
+    entries = {}
+    if omitted_url:
+        # Released refreshes normalized the cached copy, while installation kept
+        # the validated signed manifest, which could omit catalog_url.
+        source.update(last_checked_at="2026-11-22T00:00:00Z", resolved_commit="b" * 40)
+        for manifest in (previous, staged):
+            manifest["source"].pop("catalog_url")
+            cached = {**manifest, "source": {**manifest["source"], "catalog_url": source["url"], "trusted": False}}
+            entries[f"{source['name']}:{plugin_id}:{manifest['version']}"] = {
+                "source": source_id, "source_name": source["name"], "provider_id": plugin_id,
+                "name": manifest["name"], "version": manifest["version"], "trusted": False,
+                "manifest": cached, "resolved_commit": "b" * 40,
+            }
+        if binding == "omitted-url-no-cache":
+            entries.clear()
+        elif binding == "omitted-url-unchecked-source":
+            source["last_checked_at"] = None
+            source.pop("resolved_commit")
+        for entry in list(entries.values()):
+            if binding == "omitted-url-unusable-cache":
+                entry["manifest"] = None
+            elif binding == "omitted-url-wrong-url":
+                entry["manifest"]["source"]["catalog_url"] = (
+                    "https://github.com/example/former-catalog/blob/main/catalog.json")
+            elif binding == "omitted-url-other-plugin":
+                entry["provider_id"] = "another-provider"
+            elif binding == "omitted-url-other-source":
+                entry["source"] = "another-catalog"
+            elif binding == "omitted-url-other-version":
+                entry["version"] = "0.9.0"
+            elif binding == "omitted-url-manifest-mismatch":
+                entry["manifest"]["bundle_sha256"] = "c" * 64
+            elif binding == "omitted-url-stale-commit":
+                entry["resolved_commit"] = "c" * 40
+            elif binding == "omitted-url-conflicting-cache":
+                entries[f"duplicate:{plugin_id}:{entry['version']}"] = dict(entry)
     published = {**staged, "source": {**staged["source"], "catalog_url": source["url"]}}
-    write_state(
-        hub_store.legacy_state_path(), catalog_sources={source_id: source},
-        catalog_entries={f"{source_id}:{plugin_id}:{staged['version']}": {
+    if not omitted_url and source.get("resolved_commit"):
+        entries[f"{source_id}:{plugin_id}:{staged['version']}"] = {
             "provider_id": plugin_id, "version": staged["version"], "source": source_id,
             "manifest": published, "trusted": False,
-        }} if source.get("resolved_commit") else {},
+        }
+    write_state(
+        hub_store.legacy_state_path(), catalog_sources={source_id: source},
+        catalog_entries=entries,
         installations={plugin_id: {
             "provider_id": plugin_id, "name": "Provider", "state": "staged" if pending else "active",
             "pending_restart": pending,
             "source_id": source_id, "origin": "catalog", "trusted": False,
-            **({"source_bound": True} if binding != "v2.7.0" else {}),
+            **({"source_bound": binding != "omitted-url-detached"} if binding != "v2.7.0" else {}),
             "active_version": previous["version"], "active_path": bundles[0], "python_path": interpreters[0],
             "manifest": previous, "config": {"region": "eu"},
             **({"staged_version": staged["version"], "staged_path": bundles[1],
@@ -1401,6 +1446,13 @@ def test_legacy_catalog_binding_requires_matching_evidence(
         assert installed.catalog_registration == source.get("registration", "legacy")
         row = state.load_state()["installations"][plugin_id]
         assert row["source_id"] == source_id and not row.get("trust_note")
+        return
+
+    if not pending:
+        active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+        assert active.source_id == source_id and active.catalog_registration == "legacy"
+        assert state.load_state()["installations"][plugin_id]["source_id"] == source_id
+        assert service.activate_staged_installations() == []
         return
 
     assert service.activate_staged_installations() == [plugin_id]

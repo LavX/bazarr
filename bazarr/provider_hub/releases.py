@@ -235,7 +235,37 @@ def matches_catalog_registration(data: dict[str, Any], source_id: str | None, re
     return recorded == current or (recorded is None and current == _LEGACY_CATALOG_REGISTRATION)
 
 
-def _legacy_catalog_registrations(data: dict[str, Any], row: dict[str, Any],
+def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version, manifest) -> bool:
+    """Corroborate an omitted URL with one entry from the registered catalog's saved refresh."""
+    entries = data.get("catalog_entries")
+    commit = source.get("resolved_commit")
+    id_key = "id" if manifest.get("schema_version") == 2 else "provider_id"
+    if (not isinstance(entries, dict) or not isinstance(commit, str) or not commit
+            or manifest.get(id_key) != plugin_id or manifest.get("version") != version
+            or manifest["source"].get("commit") != commit):
+        return False
+
+    installed = {**manifest, "source": {key: value for key, value in manifest["source"].items() if key != "trusted"}}
+    matched = False
+    for entry in entries.values():
+        if not (isinstance(entry, dict) and entry.get("source") == source_id
+                and entry.get("provider_id") == plugin_id and entry.get("version") == version
+                and entry.get("resolved_commit") == commit):
+            continue
+        cached = entry.get("manifest")
+        cached_source = cached.get("source") if isinstance(cached, dict) else None
+        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != source["url"]:
+            continue
+        comparable = {**cached, "source": {key: value for key, value in cached_source.items()
+                                           if key not in ("catalog_url", "trusted")}}
+        if comparable == installed:
+            if matched:
+                return False
+            matched = True
+    return matched
+
+
+def _legacy_catalog_registrations(data: dict[str, Any], plugin_id: str, row: dict[str, Any],
                                   active: _Slot | None, staged: _Slot | None) -> dict[str, str | None] | None:
     """Resolve each inline community release's binding before its first store write."""
     from .state import OFFICIAL_CATALOG_SOURCE_ID
@@ -245,14 +275,20 @@ def _legacy_catalog_registrations(data: dict[str, Any], row: dict[str, Any],
             or source_id == OFFICIAL_CATALOG_SOURCE_ID or (active is None and staged is None)):
         return None
     source = (data.get("catalog_sources") or {}).get(source_id)
-    url = source.get("url") if isinstance(source, dict) and not source.get("registration") else None
+    url = source.get("url") if (isinstance(source, dict) and not source.get("registration")
+                               and row.get("source_bound", True) is True) else None
     registrations = {}
     for state, slot in ((ACTIVE, active), (STAGED, staged)):
         if slot is None:
             continue
         manifest_source = (slot.manifest or {}).get("source")
-        matches = (row.get("source_bound", True) is True and isinstance(url, str) and bool(url)
-                   and isinstance(manifest_source, dict) and manifest_source.get("catalog_url") == url)
+        matches = False
+        if isinstance(url, str) and url and isinstance(manifest_source, dict):
+            if "catalog_url" in manifest_source:
+                matches = manifest_source["catalog_url"] == url
+            else:
+                matches = _legacy_cached_manifest_matches(data, source_id, source, plugin_id, slot.version,
+                                                         slot.manifest)
         registrations[state] = _LEGACY_CATALOG_REGISTRATION if matches else None
     row["source_bound"] = True
     if not registrations.get(STAGED, registrations.get(ACTIVE)):
@@ -506,7 +542,7 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
         inline_source = installation.get("source_id")
         legacy_registrations = None
         if plugin_id in getattr(data, "inline_releases", ()) and getattr(data, "staging_install", None) != plugin_id:
-            legacy_registrations = _legacy_catalog_registrations(data, installation, active, staged)
+            legacy_registrations = _legacy_catalog_registrations(data, plugin_id, installation, active, staged)
         row = dict(installation)
         existing = by_plugin.get(plugin_id, [])
         claimed: set[int] = set()
