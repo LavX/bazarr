@@ -430,12 +430,13 @@ class TranslationJobs:
         return self._transition(job_id, (QUEUED,), None, _queue_job_id=expected_queue_job_id,
                                 queue_job_id=queue_job_id)
 
-    def requeue(self, job_id: int, queue_job_id: int | None = None) -> bool:
+    def requeue(self, job_id: int, queue_job_id: int | None = None, *, only_if_due: bool = False) -> bool:
         """A job awaiting its retry goes back on the queue. Its checkpoints stop counting down."""
         job = self.get(job_id)
         if job is None:
             return False
         return self._transition(job_id, (AWAITING_RETRY,), QUEUED, queue_job_id=queue_job_id, retry_at=None,
+                                _only_if_due=only_if_due,
                                 _with=self.checkpoints._expiry_stmt(job.source_path, job.target, None))
 
     def start(self, job_id: int, *, source_digest: str, engine_instance_id: int, settings_revision: int,
@@ -601,7 +602,7 @@ class TranslationJobs:
 
     # ---------------------------------------------------------------- internals
     def _transition(self, job_id: int, from_states: Sequence[str], to_state: str | None, *, _with=None,
-                    _queue_job_id=_ANY_QUEUE_JOB, _owner=None, **values) -> bool:
+                    _queue_job_id=_ANY_QUEUE_JOB, _owner=None, _only_if_due=False, **values) -> bool:
         """Change a job only while it is in one of ``from_states``. False when it was not.
 
         ``_with`` is a checkpoint statement that goes in the same transaction, run only when the job
@@ -615,6 +616,9 @@ class TranslationJobs:
             TableTranslatorJob.id == job_id, TableTranslatorJob.state.in_(from_states))
         if _queue_job_id is not _ANY_QUEUE_JOB:
             statement = statement.where(TableTranslatorJob.queue_job_id == _queue_job_id)
+        if _only_if_due:
+            retry_at = TableTranslatorJob.retry_at
+            statement = statement.where(retry_at.is_(None) | (retry_at <= changes["updated_at"]))
         if _owner is not None:
             phase, queue_job_id = _owner
             attached = TableTranslatorJob.queue_job_id
