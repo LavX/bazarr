@@ -130,20 +130,23 @@ def _slot(row, keys, with_activation):
     }
 
 
-def _legacy_cached_manifest_matches(document, source_id, source, plugin_id, version, manifest):
-    """Frozen copy of the store's cached manifest check for this upgrade."""
+def _legacy_manifest_provenance_matches(document, source_id, source, plugin_id, version, manifest):
+    """Frozen copy of the store's legacy manifest provenance check for this upgrade."""
     entries = document.get("catalog_entries")
     commit = source.get("resolved_commit")
-    digest = manifest.get("bundle_sha256")
+    declared_url = manifest["source"].get("catalog_url")
+    direct = declared_url == source["url"]
     id_key = "id" if manifest.get("schema_version") == 2 else "provider_id"
     if (not isinstance(entries, dict) or not isinstance(commit, str) or not commit
-            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)
             or manifest.get(id_key) != plugin_id or manifest.get("version") != version
             or manifest["source"].get("commit") != commit):
-        return False
+        return direct
 
+    digest = manifest.get("bundle_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        return False
     digest = digest.lower()
-    expected_url = manifest["source"].get("catalog_url") or source["url"]
+    expected_url = declared_url or source["url"]
     installed = {**manifest, "source": {key: value for key, value in manifest["source"].items()
                                         if key not in ("catalog_url", "trusted")}}
     # Schema 2 subtitle installs materialize the schema 1 provider ID for downstream callers.
@@ -168,10 +171,10 @@ def _legacy_cached_manifest_matches(document, source_id, source, plugin_id, vers
         if id_key == "id" and comparable.get("provider_id") == plugin_id:
             comparable.pop("provider_id")
         if comparable == installed:
-            if matched:
+            if matched and not direct:
                 return False
             matched = True
-    return matched
+    return direct or matched
 
 
 def _legacy_catalog_fields(document, plugin_id, row, version, manifest):
@@ -185,8 +188,7 @@ def _legacy_catalog_fields(document, plugin_id, row, version, manifest):
     manifest_source = manifest.get("source") if isinstance(manifest, dict) else None
     if not isinstance(url, str) or not url or not isinstance(manifest_source, dict):
         return []
-    matches = (manifest_source.get("catalog_url") == url
-               or _legacy_cached_manifest_matches(document, source_id, source, plugin_id, version, manifest))
+    matches = _legacy_manifest_provenance_matches(document, source_id, source, plugin_id, version, manifest)
     return ["catalog_registration:legacy"] if matches else []
 
 

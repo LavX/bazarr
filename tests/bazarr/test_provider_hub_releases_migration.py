@@ -44,6 +44,7 @@ def _migration():
     ("historic-url", True),
     ("republished-schema-2", True),
     ("republished-conflicting-peer", False),
+    ("direct-url-conflicting-peer", False),
     ("malformed-sources", False),
 ])
 def test_legacy_release_binding_agrees_on_retained_artifact_evidence(evidence, bound):
@@ -58,6 +59,8 @@ def test_legacy_release_binding_agrees_on_retained_artifact_evidence(evidence, b
     if evidence == "historic-url":
         manifest["source"]["catalog_url"] = url
         source_records[source_id].pop("resolved_commit")
+    elif evidence == "direct-url-conflicting-peer":
+        manifest["source"]["catalog_url"] = url
     elif evidence == "malformed-digest":
         manifest["bundle_sha256"] = [digest]
     elif evidence == "malformed-sources":
@@ -79,9 +82,10 @@ def test_legacy_release_binding_agrees_on_retained_artifact_evidence(evidence, b
         if evidence == "unrelated-source":
             peer["source"] = "other"
         entries = {"second": peer, **entries} if evidence.endswith("-first") else {**entries, "second": peer}
-    elif evidence == "republished-conflicting-peer":
+    elif evidence.endswith("conflicting-peer"):
+        peer_url = url if evidence.startswith("republished") else "https://other.invalid/catalog.json"
         entries["second"] = {**entry, "manifest": {**cached, "bundle_sha256": "c" * 64,
-                                                  "source": {**cached["source"], "catalog_url": url}}}
+                                                    "source": {**cached["source"], "catalog_url": peer_url}}}
     elif evidence == "duplicate":
         entries["second"] = copy.deepcopy(entry)
 
