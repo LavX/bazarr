@@ -846,12 +846,14 @@ def test_a_root_edit_checks_the_new_roots_and_survives_a_scan_that_cannot_be_que
     monkeypatch.setattr(repository, "get_source", lambda sid, target=None: SimpleNamespace(kind="jellyfin", id=sid))
     (tmp_path / "New").mkdir()
 
-    for roots, message in (([{"local_path": str(tmp_path / "missing")}], "not a readable folder"),
-                           ([{"local_path": str(other_root / "inside")}], "overlaps"),
-                           ([{"local_path": str(other_root)}], "overlaps")):
+    def roots(path):
+        return [{"server_path": "/server/movies", "local_path": str(path)}]
+
+    for path, message in ((tmp_path / "missing", "not a readable folder"),
+                          (other_root / "inside", "overlaps"), (other_root, "overlaps")):
         (other_root / "inside").mkdir(exist_ok=True)
         with pytest.raises(service.SourceError) as refused:
-            service.change_library_roots(source_id, library_id, roots)
+            service.change_library_roots(source_id, library_id, roots(path))
         assert message in str(refused.value)
     assert [row.local_path for row in repository.get_roots(library_id)] == [str(root)]
 
@@ -860,8 +862,10 @@ def test_a_root_edit_checks_the_new_roots_and_survives_a_scan_that_cannot_be_que
 
     monkeypatch.setattr(service, "queue_scan", disabled)
     # The edit stays committed; the scan runs when the library is enabled again.
-    assert service.change_library_roots(source_id, library_id, [{"local_path": str(tmp_path / "New")}]) == 0
-    assert [row.local_path for row in repository.get_roots(library_id)] == [str(tmp_path / "New")]
+    assert service.change_library_roots(source_id, library_id, roots(tmp_path / "New")) == 0
+    assert [(row.server_path, row.local_path) for row in repository.get_roots(library_id)] == [
+        ("/server/movies", str(tmp_path / "New")),
+    ]
 
 
 def test_deleting_many_items_goes_in_batches(movies, monkeypatch):
