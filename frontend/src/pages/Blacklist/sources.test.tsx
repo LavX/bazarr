@@ -84,14 +84,22 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     id: 83,
     source_key: "source:8",
     source_id: 8,
+    source_item_id: null,
     source_name: "Retained Folder",
     [titleKey]: "Retained folder title",
   };
 
-  function mockExclusions(conflict = false) {
+  function mockExclusions({ conflict = false, retainedOnly = false } = {}) {
     const gets = vi.fn();
     const deletes = vi.fn();
-    let rows = [arr, source, removed, retained];
+    let rows: (
+      | typeof arr
+      | typeof source
+      | typeof removed
+      | typeof retained
+    )[] = retainedOnly
+      ? [arr, removed, retained]
+      : [arr, source, removed, retained];
     server.use(
       http.get("/api/system/settings", () =>
         HttpResponse.json({
@@ -113,14 +121,25 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
       ),
       http.get("/api/system/media-sources", () =>
         HttpResponse.json({
-          data: [
-            {
-              id: 7,
-              kind: "folder",
-              name: "Media Folder",
-              enabled: true,
-              libraries: [{ content_kind: kind, enabled: true }],
+          availability: {
+            [kind]: {
+              browsable: !retainedOnly,
+              searchable: !retainedOnly,
+              retained: true,
             },
+          },
+          data: [
+            ...(retainedOnly
+              ? []
+              : [
+                  {
+                    id: 7,
+                    kind: "folder",
+                    name: "Media Folder",
+                    enabled: true,
+                    libraries: [{ content_kind: kind, enabled: true }],
+                  },
+                ]),
             {
               id: 8,
               kind: "folder",
@@ -341,6 +360,36 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
     },
   );
 
+  it("keeps retained exclusions visible without a current library or source filter", async () => {
+    const user = userEvent.setup();
+    const { gets } = mockExclusions({ retainedOnly: true });
+    customRender(<View />);
+    expect(await screen.findByText("Retained folder title")).toBeVisible();
+    expect(screen.getByText("Recorded removed title")).toBeVisible();
+    expect(gets).toHaveBeenCalledWith({ sources: "1", keys: [] });
+
+    const listbox = await openSelect(user, "All sources");
+    await user.click(
+      within(listbox).getByRole("option", {
+        name: "Retained Folder",
+        hidden: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(gets).toHaveBeenCalledWith({ sources: "1", keys: ["source:8"] }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Recorded removed title"),
+      ).not.toBeInTheDocument(),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Clear source filter" }),
+    );
+    expect(await screen.findByText("Recorded removed title")).toBeVisible();
+    expect(screen.getByText("Retained folder title")).toBeVisible();
+  });
+
   it("removes all Arr and source exclusions without a source filter", async () => {
     const user = userEvent.setup();
     const { expectDelete } = mockExclusions();
@@ -353,7 +402,7 @@ describe.each(["movie", "series"] as const)("%s source exclusions", (kind) => {
 
   it("refreshes a stale exclusion and uses the new removal key", async () => {
     const user = userEvent.setup();
-    const { expectDelete } = mockExclusions(true);
+    const { expectDelete } = mockExclusions({ conflict: true });
     customRender(<View />);
     const stale = await screen.findByRole("row", { name: /Folder title/ });
     await user.click(

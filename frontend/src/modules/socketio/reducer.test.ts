@@ -193,6 +193,59 @@ describe("socketio reducer", () => {
     },
   );
 
+  it("refreshes Sports activity containing source rows after a background source save", async () => {
+    const update = reducerFor("source-sports").update as
+      | ((payload: number[]) => void)
+      | undefined;
+    update?.([7]);
+    await vi.waitFor(() =>
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [QueryKeys.System, QueryKeys.Badges, true],
+        exact: true,
+      }),
+    );
+    const options = queryClientMock.invalidateQueries.mock.calls
+      .map(([value]) => value)
+      .find(({ queryKey }) => queryKey[0] === QueryKeys.Sports);
+    expect(options).toBeDefined();
+    for (const kind of ["leagues", "wanted", "history"]) {
+      expect(
+        options.predicate({
+          queryKey: [QueryKeys.Sports, kind, { includeSources: true }],
+        }),
+      ).toBe(true);
+      for (const [sourceKey, matches] of [
+        ["source:7", true],
+        ["source:8", false],
+        ["arr:3", false],
+      ] as const) {
+        expect(
+          options.predicate({
+            queryKey: [
+              QueryKeys.Sports,
+              kind,
+              { includeSources: true, sourceKeys: [sourceKey] },
+            ],
+          }),
+        ).toBe(matches);
+      }
+      expect(
+        options.predicate({
+          queryKey: [
+            QueryKeys.Sports,
+            kind,
+            { includeSources: true, owner: 3 },
+          ],
+        }),
+      ).toBe(false);
+      expect(
+        options.predicate({
+          queryKey: [QueryKeys.Sports, kind, { includeSources: false }],
+        }),
+      ).toBe(false);
+    }
+  });
+
   it("invalidates the wanted series query for reset-episode-wanted events", () => {
     reducerFor("reset-episode-wanted").any?.();
 

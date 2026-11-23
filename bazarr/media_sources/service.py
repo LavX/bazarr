@@ -833,6 +833,7 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
     title = context.group_title if context.kind == 'episode' and context.group_title else context.title
 
     from subtitles.download import generate_subtitles
+    from app.event_handler import event_stream
     from app.notifier import send_notifications_source
 
     downloaded = []
@@ -853,6 +854,12 @@ def _download_source_subtitles(context, item, languages, job_id, *, translation_
             if getattr(result, 'source_indexed', False) is not True:
                 # Retry an incomplete listing, including results from outside shared processing.
                 index_and_notify_item(current)
+            if current.kind == 'sports_event':
+                # Sports activity now includes both the indexed file and its committed history.
+                try:
+                    event_stream(type='source-sports', payload=current.source_id)
+                except Exception:
+                    logging.exception('BAZARR could not refresh Sports activity for source item %s', context.item_id)
             try:
                 send_notifications_source(current, result.message)
             except Exception:

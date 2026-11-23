@@ -40,17 +40,16 @@ function IdentityForm({
   const [year, setYear] = useState<number | string>(
     item.year ? Number(item.year) : "",
   );
-  const [season, setSeason] = useState<number | string>(
-    "season" in item ? (item.season ?? "") : "",
-  );
+  const originalSeason = "season" in item ? item.season : null;
+  const originalEpisode = "episode" in item ? item.episode : null;
+  const originalDate = "event_date" in item ? item.event_date : null;
+  const [season, setSeason] = useState<number | string>(originalSeason ?? "");
   const [episode, setEpisode] = useState<number | string>(
-    "episode" in item ? (item.episode ?? "") : "",
+    originalEpisode ?? "",
   );
   const isEpisode = item.kind === "episode";
   const isSport = item.kind === "sports_event";
-  const [date, setDate] = useState(
-    "event_date" in item ? (item.event_date ?? "") : "",
-  );
+  const [date, setDate] = useState(originalDate ?? "");
   const [part, setPart] = useState(
     "part_name" in item ? (item.part_name ?? "") : "",
   );
@@ -92,9 +91,15 @@ function IdentityForm({
               : {}),
             ...(isSport
               ? {
-                  ...(date ? { event_date: date } : {}),
-                  ...(typeof season === "number" ? { season } : {}),
-                  ...(typeof episode === "number" ? { round: episode } : {}),
+                  ...(date || originalDate != null
+                    ? { event_date: date || null }
+                    : {}),
+                  ...(typeof season === "number" || originalSeason != null
+                    ? { season: typeof season === "number" ? season : null }
+                    : {}),
+                  ...(typeof episode === "number" || originalEpisode != null
+                    ? { round: typeof episode === "number" ? episode : null }
+                    : {}),
                   part_name: part.trim() || null,
                 }
               : {}),

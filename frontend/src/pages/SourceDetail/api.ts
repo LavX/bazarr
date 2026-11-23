@@ -118,10 +118,10 @@ export type IdentityCorrection =
   | {
       title: string;
       year?: number;
-      season?: number;
+      season?: number | null;
       episode?: number;
-      round?: number;
-      event_date?: string;
+      round?: number | null;
+      event_date?: string | null;
       part_name?: string | null;
     };
 

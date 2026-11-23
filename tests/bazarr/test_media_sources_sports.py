@@ -689,6 +689,13 @@ def test_sports_item_override_controls_provider_identity(client, arr_library, tm
     assert response.get_json()['round'] == 10
     context = resolve_item(dated)
     assert (context.title, context.year) == ('Test Grand Prix Qualifying', 2027)
+    for field, value in (('event_date', '2027-05-21'), ('season', 2027), ('round', 10)):
+        cleared = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={field: None})
+        assert cleared.status_code == 200, cleared.json
+        assert cleared.json[field] is None
+        restored = client.patch(f'/api/sources/items/{dated}', headers=HEADERS, json={field: value})
+        assert restored.status_code == 200, restored.json
+        assert restored.json[field] == value
     for patch in ({'event_date': '2026-02-29'}, {'round': None}, {'candidate_id': 65536}):
         assert client.patch(f'/api/sources/items/{round_id}', headers=HEADERS, json=patch).status_code == 400
 
@@ -781,7 +788,16 @@ def test_scanned_events_reach_the_sports_threshold_and_publish_through_the_sourc
     monkeypatch.setattr(processing, 'call_external_webhook', Mock())
     monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
     monkeypatch.setattr(service, 'get_providers', lambda: ['fake'])
-    monkeypatch.setattr('app.event_handler.socketio.emit', Mock())
+    visible_history = []
+
+    def socket_event(event, payload):
+        if event == 'data' and payload['type'] == 'source-sports':
+            history = repository.History
+            rows = source_db.execute(sa.select(history.c.action).where(
+                history.c.item_kind == 'sports_event')).scalars().all()
+            visible_history.append((payload['payload'], rows))
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', socket_event)
     monkeypatch.setattr('app.notifier.send_notifications_source', Mock())
 
     def unexpected(*args, **kwargs):
@@ -838,6 +854,7 @@ def test_scanned_events_reach_the_sports_threshold_and_publish_through_the_sourc
     assert not paths[3].with_suffix('.en.srt').exists()
     assert {(event.media_type, event.operation, event.arr_instance_id, event.source_item_id) for event in published} == {
         ('sports', 'download', None, items[str(path)].id) for path in (paths[0], paths[2])}
+    assert visible_history == [(source_id, [1]), (source_id, [1, 1])]
     rows = source_db.execute(sa.select(repository.History)).all()
     assert {(row.item_kind, row.action, row.video_path) for row in rows} == {
         ('sports_event', 1, str(path)) for path in (paths[0], paths[2])}

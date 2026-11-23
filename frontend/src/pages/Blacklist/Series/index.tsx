@@ -15,6 +15,7 @@ import Table from "./table";
 const BlacklistSeriesView: FunctionComponent = () => {
   const filter = useSourceFilter("series", "sonarr", {
     includeDisabledSources: true,
+    includeRetainedSources: true,
   });
   const { selected, includeSources, labels, onChange } = filter;
   const sourceOptions = useSourceOptions("episode", includeSources);

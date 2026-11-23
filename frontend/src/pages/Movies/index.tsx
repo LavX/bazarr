@@ -629,6 +629,7 @@ const MovieView: FunctionComponent = () => {
         searchValue={search}
         onSearchChange={setSearch}
         audioLanguages={audioLanguages}
+        includeSourceAudio={hasSources}
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
