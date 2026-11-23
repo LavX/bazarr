@@ -2,6 +2,7 @@ import {
   ASS_EVENT_COLUMNS,
   type AssEventMetadata,
   assTextToDisplay,
+  SSA_EVENT_COLUMNS,
 } from "@/pages/SubtitleEditor/parsers/ass";
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleSerializer } from "./index";
@@ -44,7 +45,7 @@ function patchDialogueLine(
   text: string,
 ): string {
   // Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-  const match = rawLine.match(/^(Dialogue:\s*)(.*)$/);
+  const match = rawLine.match(/^(Dialogue:\s*)(.*)$/s);
   if (!match) return rawLine;
 
   const afterPrefix = match[2];
@@ -79,10 +80,7 @@ export const assSerializer: SubtitleSerializer = {
       (cue) => (cue.formatMetadata as AssEventMetadata | undefined)?.assFields,
     );
     const marked = fields.some((event) => event?.marked !== undefined);
-    const columns = [
-      marked ? "Marked" : ASS_EVENT_COLUMNS[0],
-      ...ASS_EVENT_COLUMNS.slice(1),
-    ];
+    const columns = marked ? SSA_EVENT_COLUMNS : ASS_EVENT_COLUMNS;
     const marker = marked ? "Marked=0" : "0";
     const dialogueLines = cues.map((cue, index) => {
       const event = fields[index];

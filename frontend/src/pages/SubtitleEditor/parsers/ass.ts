@@ -40,6 +40,14 @@ export const ASS_EVENT_COLUMNS = [
   "Text",
 ] as const;
 
+export const SSA_EVENT_COLUMNS = [
+  "Marked",
+  ...ASS_EVENT_COLUMNS.slice(1),
+] as const;
+const normalizedSsaColumns = SSA_EVENT_COLUMNS.map((column) =>
+  column.toLowerCase(),
+);
+
 export interface AssEventMetadata {
   assFields: Record<string, string>;
 }
@@ -86,7 +94,7 @@ function* dialogueRows(eventSections: string[][], strict: boolean) {
       }
       if (strict) {
         if (!/^\s*Dialogue\b/i.test(line)) continue;
-        const dialogue = line.match(/^\s*Dialogue\s*:\s*(.*)$/i);
+        const dialogue = line.match(/^\s*Dialogue\s*:\s*(.*)$/is);
         if (!dialogue || columns.length === 0) {
           throw new Error("Invalid ASS event format");
         }
@@ -132,7 +140,7 @@ export const assParser: SubtitleParser = {
         sections[currentSection] = "";
       } else {
         if (strict) {
-          if (/^\s*\[\s*Events(?:\s*\]|$)/i.test(line)) {
+          if (/^\s*\[\s*Events\s*(?:\]|$)/i.test(line)) {
             throw new Error("Invalid ASS Events section");
           }
           if (currentSection === "Events") {
@@ -209,13 +217,22 @@ export const assParser: SubtitleParser = {
       if (strict && (startMs === null || endMs === null)) {
         throw new Error("Invalid ASS cue timing");
       }
+      // The serializer writes canonical SSA fields after a checked reload. Keep
+      // them on a normal reopen so a second save keeps the Marked declaration.
+      const keepMarkedFields =
+        isSSA &&
+        parts.length === normalizedSsaColumns.length &&
+        columns.length === normalizedSsaColumns.length &&
+        normalizedSsaColumns.every(
+          (column, index) => column === columns[index],
+        );
       cues.push({
         id: cueId(),
         startMs: startMs ?? 0,
         endMs: endMs ?? 0,
         text: assTextToDisplay(rawCueText),
         rawText: line,
-        ...(strict && {
+        ...((strict || keepMarkedFields) && {
           formatMetadata: {
             assFields: Object.fromEntries(
               columns.map((column, index) => [column, parts[index]]),

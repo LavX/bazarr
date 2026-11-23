@@ -1300,6 +1300,32 @@ describe("parseReplacementSubtitle", () => {
         expect(() => parseReplacementSubtitle(format, content)).toThrow();
       });
 
+      it("round-trips Unicode line separators within dialogue", () => {
+        const text = "One\u2028Two\u2029Three";
+        const serializer = getSerializer(format);
+        const saved = serializer.serialize({
+          metadata: { format, rawHeader: `[${styles}]` },
+          cues: [{ id: "first", startMs: 0, endMs: 1000, text }],
+        });
+        expect(parseReplacementSubtitle(format, saved).cues).toMatchObject([
+          { endMs: 1000, text },
+        ]);
+
+        const reopened = getParser(format).parse(saved);
+        reopened.cues[0].endMs = 1500;
+        expect(
+          parseReplacementSubtitle(format, serializer.serialize(reopened)).cues,
+        ).toMatchObject([{ endMs: 1500, text }]);
+      });
+
+      it("rejects an unterminated Events section with trailing whitespace", () => {
+        const content = `${header}\nFormat: Start, End, Text\nDialogue: 0:00:00.00,0:00:01.00,First\n[Events \nDialogue: 0:00:02.00,0:00:03.00,Second`;
+
+        expect(() => parseReplacementSubtitle(format, content)).toThrow(
+          "Invalid ASS Events section",
+        );
+      });
+
       it("reloads comma-bearing and empty cues from the serializer", () => {
         const cues = [
           { id: "first", startMs: 0, endMs: 1000, text: "Hello, world\nAgain" },
@@ -1318,6 +1344,28 @@ describe("parseReplacementSubtitle", () => {
       });
     },
   );
+
+  it("keeps SSA Marked through a normal reopen and a second save", () => {
+    const content =
+      "[V4 Styles]\n[Events]\nFormat: Marked, Start, End, Style, Text\n" +
+      "Dialogue: Marked=1,0:00:00.00,0:00:01.00,Emphasis,{\\i1}First";
+    const serializer = getSerializer("ssa");
+    const firstSave = serializer.serialize(
+      parseReplacementSubtitle("ssa", content),
+    );
+    expect(firstSave).toContain("Format: Marked, Start, End");
+
+    const reopened = getParser("ssa").parse(firstSave);
+    reopened.cues[0].endMs = 1500;
+    const secondSave = serializer.serialize(reopened);
+    expect(secondSave).toContain("Format: Marked, Start, End");
+    expect(secondSave).toContain(
+      "Dialogue: Marked=1,0:00:00.00,0:00:01.50,Emphasis,,0,0,0,,{\\i1}First",
+    );
+    expect(parseReplacementSubtitle("ssa", secondSave).cues).toMatchObject([
+      { endMs: 1500, text: "First" },
+    ]);
+  });
 
   it.each([
     ["srt", "1\n00:00:02,000 --> 00:00:01,000\nBackwards cue"],
