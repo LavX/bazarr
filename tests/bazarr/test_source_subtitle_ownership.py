@@ -429,6 +429,82 @@ def test_source_delete_pins_native_ownership_on_postgresql(toolbox, monkeypatch)
     assert [event.operation for event in toolbox.world.published] == ['delete']
 
 
+@pytest.mark.parametrize('layout', ['current', 'absolute'], ids=['beside-video', 'custom-folder'])
+def test_source_blacklist_delete_pins_arr_master_toggle_through_unlink(toolbox, monkeypatch, layout):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    import sqlalchemy as sa
+    from app import config
+    from media_sources import indexer, repository
+    from subtitles.tools import delete
+    from subtitles.tools.subsync_engines import regular_subtitle_version
+
+    context = tools.pipeline._sports(toolbox.world)
+    directory = Path(context.path).parent
+    if layout == 'absolute':
+        directory = toolbox.world.tmp_path / 'Shared subtitles'
+        directory.mkdir()
+        monkeypatch.setattr(config.settings.general, 'subfolder', 'absolute')
+        monkeypatch.setattr(config.settings.general, 'subfolder_custom', str(directory))
+    path = directory / Path(context.path).with_suffix('.en.srt').name
+    path.write_text(tools.SRT)
+    assert indexer.index_item(context.item_id) is not None
+    acquired = repository.insert_history(
+        toolbox.db, item_id=context.item_id, source_id=context.source_id, item_kind=context.kind,
+        video_path=context.path, subtitles_path=str(path), language='en', action=2,
+        provider='fake', subs_id='release-to-delete', description='Fixture acquisition',
+        published_file_version=list(regular_subtitle_version(path)))
+    _sportarr_claim(toolbox, context, monkeypatch)
+    monkeypatch.setattr(config.settings.general, 'use_sportarr', False)
+    assert repository.get_item(context.item_id).arr_shadow == 0
+    remove_file = delete.os.remove
+    changed = Event()
+    saving_or_waiting = Event()
+    checks = []
+    unlinked = []
+    wait_for_settings = config._subtitle_settings_condition.wait
+
+    def wake_on_save_wait(timeout=None):
+        saving_or_waiting.set()
+        return wait_for_settings(timeout)
+
+    monkeypatch.setattr(config._subtitle_settings_condition, 'wait', wake_on_save_wait)
+
+    def enable_native_owner():
+        with config._subtitle_settings_write_guard():
+            config.settings.general.use_sportarr = True
+            changed.set()
+            saving_or_waiting.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def remove(subtitle_path):
+            if Path(subtitle_path) == path:
+                checks.append(pool.submit(enable_native_owner))
+                assert saving_or_waiting.wait(timeout=2)
+                assert not changed.is_set(), 'Arr master toggle changed before the keyed subtitle unlink'
+                assert config.settings.general.use_sportarr is False
+                unlinked.append(subtitle_path)
+            return remove_file(subtitle_path)
+
+        monkeypatch.setattr(delete.os, 'remove', remove)
+        removed = toolbox.client.post(f'/api/sources/items/{context.item_id}/blacklist', headers=tools.HEADERS,
+                                      json={'language': 'en', 'subtitles_path': str(path), 'provider': 'fake',
+                                            'subs_id': 'release-to-delete', 'history_id': acquired})
+        assert removed.status_code == 204, removed.get_data(as_text=True)
+        (save,) = checks
+        save.result(timeout=2)
+
+    assert changed.is_set() and config.settings.general.use_sportarr is True
+    assert unlinked == [str(path)]
+    assert not path.exists()
+    assert list(toolbox.db.scalars(sa.select(repository.History.c.action).order_by(repository.History.c.id))) == [2, 0]
+    (blacklisted,) = toolbox.db.execute(sa.select(repository.Blacklist)).all()
+    assert (blacklisted.item_id, blacklisted.provider, blacklisted.subs_id, blacklisted.language) == (
+        context.item_id, 'fake', 'release-to-delete', 'en')
+    assert [event.operation for event in toolbox.world.published] == ['delete']
+
+
 def test_shadowed_recording_keeps_manual_search_and_upload_available(toolbox, monkeypatch):
     from io import BytesIO
     from unittest.mock import Mock

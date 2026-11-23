@@ -685,6 +685,9 @@ def _save_downloaded_subtitles(video, subtitle, path, validate=None, publication
     """Publish provider bytes using the common format, naming and atomic writer."""
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith('win') and settings.general.chmod_enabled else None
     written_paths = [] if written_paths is None else written_paths
+    if source is not None and published_versions is None:
+        published_versions = {}
+
     def write(destination, content):
         if validate is not None:
             validate(destination)

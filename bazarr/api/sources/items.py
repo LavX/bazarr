@@ -49,6 +49,8 @@ def _listing(text):
 
 def item_to_dict(item):
     """One item as the API shows it. Paths are the Bazarr-visible ones, as stored."""
+    subtitles = [entry[:3] if isinstance(entry, (list, tuple)) and len(entry) == 4 and entry[1] else entry
+                 for entry in _listing(item.subtitles)]
     return {
         'id': item.id, 'source_id': item.source_id, 'library_id': item.library_id, 'group_id': item.group_id,
         'kind': item.kind, 'path': item.path, 'title': item.title, 'parsed_title': item.parsed_title,
@@ -62,7 +64,7 @@ def item_to_dict(item):
         'shadowed_by': item.shadow_owner, 'server_missing': bool(item.server_missing),
         'audio_language': _listing(item.audio_language),
         'file_size': item.file_size, 'scene_name': item.scene_name,
-        'subtitles': _listing(item.subtitles), 'missing_subtitles': _listing(item.missing_subtitles),
+        'subtitles': subtitles, 'missing_subtitles': _listing(item.missing_subtitles),
         'indexed_at': item.indexed_at.isoformat() if item.indexed_at else None,
         **({'event_date': item.event_date, 'round': item.episode, 'part_number': item.part_number or None,
             'part_name': item.part_name} if item.kind == 'sports_event' else {}),

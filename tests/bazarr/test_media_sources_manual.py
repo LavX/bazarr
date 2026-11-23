@@ -170,6 +170,101 @@ def _search_for_download(client, monkeypatch, source, during_search=None):
     return {'provider': choice['provider'], 'subtitle': choice['subtitle']}, candidate.id
 
 
+@pytest.mark.parametrize('acquisition', ['manual', 'wanted'])
+@pytest.mark.parametrize('upload_at', ['before_processing', 'after_sync', None])
+def test_provider_processing_keeps_ownership_of_its_written_file(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, acquisition, upload_at):
+    from app.config import settings
+    from media_sources import service, wanted
+    from subtitles import download, manual, post_processing, processing, sync
+    from subtitles.tools import subsyncer
+
+    source = _item(arr_library, tmp_path, 'movie')
+    destination = Path(source.path).with_suffix('.en.srt')
+    synced = pipeline.CONTENT.replace(b'Downloaded', b'Synchronized provider subtitle')
+    uploaded = pipeline.CONTENT.replace(b'Downloaded', b'New manual upload')
+    engines = []
+    commands = []
+
+    monkeypatch.setattr(processing, '_defaul_sync_checker', lambda subtitle: True)
+    monkeypatch.setattr(settings.general, 'use_postprocessing', True)
+    monkeypatch.setattr(settings.general, 'postprocessing_cmd', 'fixture-command {{subtitles}} {{provider}}')
+    monkeypatch.setattr(settings.general, 'use_postprocessing_threshold_movie', False)
+    monkeypatch.setattr(settings.general, 'chmod_enabled', True)
+    monkeypatch.setattr(settings.general, 'chmod', '0640')
+    monkeypatch.setattr(settings.subsync, 'use_subsync', True)
+    monkeypatch.setattr(settings.subsync, 'use_subsync_movie_threshold', False)
+    monkeypatch.setattr(settings.subsync, 'enabled_engines', ['alass'])
+    monkeypatch.setattr(settings.subsync, 'output_mode', 'overwrite')
+    monkeypatch.setattr(sync, 'jobs_queue', isolated_jobs)
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        assert video_path == source.path
+        engines.append((engine, Path(self.srtin).read_bytes()))
+        output_path.write_bytes(synced)
+        return {'offset_seconds': 0.25, 'framerate_scale_factor': 1.0, 'quality_of_fit': 0.9}
+
+    def command(args, path):
+        assert args[:2] == ['fixture-command', str(destination)]
+        assert path == source.path
+        commands.append((args[2], destination.read_bytes()))
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
+    monkeypatch.setattr(post_processing, '_postprocessing_locked', command)
+    url = f'/api/sources/items/{source.item_id}'
+
+    def upload_subtitle(expected):
+        assert destination.read_bytes() == expected
+        response = client.post(f'{url}/subtitles', headers=HEADERS, data={
+            'file': (BytesIO(uploaded), 'fixture.srt'), 'language': 'en', 'forced': 'False', 'hi': 'False',
+        })
+        assert response.status_code == 202
+        job = isolated_jobs._reserve_next_job()
+        assert job.job_id == response.json['job_id']
+        assert isolated_jobs._run_job(job), job.error
+        assert destination.read_bytes() == uploaded
+
+    if upload_at == 'before_processing':
+        def process_after_upload(*args, **kwargs):
+            upload_subtitle(pipeline.CONTENT)
+            return processing.process_subtitle(*args, **kwargs)
+
+        monkeypatch.setattr(manual if acquisition == 'manual' else download, 'process_subtitle', process_after_upload)
+    elif upload_at == 'after_sync':
+        synchronize = sync.sync_subtitles
+
+        def sync_then_upload(*args, **kwargs):
+            result = synchronize(*args, **kwargs)
+            assert result is True
+            upload_subtitle(synced)
+            return result
+
+        monkeypatch.setattr(sync, 'sync_subtitles', sync_then_upload)
+
+    if acquisition == 'manual':
+        payload, _ = _search_for_download(client, monkeypatch, source)
+        monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
+        response = client.post(f'{url}/manual', headers=HEADERS, json=payload)
+        assert response.status_code == 202
+        job = isolated_jobs._reserve_next_job()
+        assert job.job_id == response.json['job_id']
+        assert isolated_jobs._run_job(job), job.error
+    else:
+        monkeypatch.setattr(service, 'get_providers', lambda: ['fake'])
+        monkeypatch.setattr(download, '_get_pool', lambda *args, **kwargs: Mock(
+            providers=['fake'], discarded_providers=[]))
+        monkeypatch.setattr(wanted, 'jobs_queue', isolated_jobs)
+        pipeline._download(monkeypatch)
+        job_id = wanted.wanted_search_missing_subtitles_sources(kind='movie')
+        job = isolated_jobs._reserve_next_job()
+        assert job.job_id == job_id
+        assert isolated_jobs._run_job(job), job.error
+
+    assert engines == ([] if upload_at == 'before_processing' else [('alass', pipeline.CONTENT)])
+    assert commands == ([('fake', synced)] if upload_at is None else [('manual', uploaded)])
+    assert destination.read_bytes() == (synced if upload_at is None else uploaded)
+
+
 @pytest.mark.parametrize('replacement', ['during_search', 'before_download', 'during_download'])
 def test_manual_download_rejects_video_replaced_at_same_path(
         client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, replacement):
