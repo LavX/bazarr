@@ -6,6 +6,7 @@ import srt
 import pysubs2
 import datetime
 from contextlib import contextmanager
+from io import StringIO
 
 from typing import Union
 from types import SimpleNamespace
@@ -149,37 +150,42 @@ def validate_source_translation_input(translator):
 
 def load_translation_input(translator, loader):
     """Read the captured physical input after checking its current ownership."""
+    from subtitles.tools.subsync_engines import (SubtitleSourceChanged, capture_subtitle_versions,
+                                                read_regular_subtitle, validate_subtitle_versions)
+
+    path = translator.source_srt_file
     source = getattr(translator, 'source', None)
+    runtime_versions = getattr(translator, 'expected_runtime_versions', ())
     if source is not None:
-        from subtitles.tools.subsync_engines import capture_subtitle_versions
-
         if not hasattr(translator, '_translation_input_path'):
-            translator._translation_input_path = translator.source_srt_file
-        if not (getattr(translator, 'expected_runtime_versions', ()) or getattr(translator, '_versions', ())
-                or getattr(translator, '_translation_input_versions', ())):
-            translator._translation_input_versions = capture_subtitle_versions(
-                translator.video_path, (os.path.realpath(translator.source_srt_file),))
+            translator._translation_input_path = path
+        runtime_versions = (runtime_versions or getattr(translator, '_versions', ())
+                            or getattr(translator, '_translation_input_versions', ()))
+        if not runtime_versions:
+            runtime_versions = capture_subtitle_versions(translator.video_path, (os.path.realpath(path),))
+            translator._translation_input_versions = runtime_versions
         validate_source_translation_input(translator)
+
+    if runtime_versions:
+        captured_input = runtime_versions[0].path
+        if os.path.realpath(path) != captured_input:
+            raise SourceTranslationChanged('The source subtitle now resolves to a different file')
+        path = captured_input
     source_tool = getattr(translator, 'source_tool', None)
-    if source_tool is None:
-        path = translator.source_srt_file
-        runtime_versions = getattr(translator, 'expected_runtime_versions', ())
-        if source is not None:
-            runtime_versions = (runtime_versions or getattr(translator, '_versions', ())
-                                or getattr(translator, '_translation_input_versions', ()))
-        if runtime_versions:
-            captured_input = runtime_versions[0].path
-            if os.path.realpath(path) != captured_input:
-                raise SourceTranslationChanged('The source subtitle now resolves to a different file')
-            path = captured_input
+    automatic_source = source is not None and bool(getattr(translator, 'expected_destination_versions', ()))
+    if source_tool is None and not automatic_source:
         return loader(path, encoding='utf-8')
-
-    from subtitles.tools.subsync_engines import SubtitleSourceChanged
-
     try:
-        content, _ = decode_subtitle_bytes(source_tool.sidecar.read())
-        return pysubs2.SSAFile.from_string(content)
+        if source_tool is not None:
+            raw = source_tool.sidecar.read()
+        else:
+            raw = read_regular_subtitle(path, runtime_versions[0].version, strict_metadata=True)
+            validate_subtitle_versions(runtime_versions[:1], strict_metadata=True)
+        content, _ = decode_subtitle_bytes(raw)
+        return pysubs2.SSAFile.from_file(StringIO(content, newline=None))
     except (OSError, SubtitleSourceChanged) as error:
+        if source_tool is None and isinstance(error, OSError):
+            raise
         raise SourceTranslationChanged('The source subtitle changed before translation') from error
 
 

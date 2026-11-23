@@ -287,10 +287,16 @@ def test_source_legacy_translation_rejects_a_new_shared_folder_owner(
     assert toolbox.db.execute(sa.select(repository.History)).all() == []
 
 
-def test_automatic_source_legacy_translation_keeps_profile_eligibility(toolbox, legacy_runtime, monkeypatch):
+@pytest.mark.parametrize(('encoding', 'newline', 'metadata_error'), [
+    ('utf-8', '\n', False), ('utf-8', '\r', False), ('utf-16', '\n', False), ('cp1252', '\n', False),
+    ('utf-8', '\n', True),
+], ids=['utf-8', 'utf-8-cr', 'utf-16', 'cp1252', 'metadata-error'])
+def test_automatic_source_legacy_translation_keeps_profile_eligibility(
+        toolbox, legacy_runtime, monkeypatch, encoding, newline, metadata_error):
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
     from media_sources import repository, translation
+    from media_sources.indexer import index_item
 
     profile = [{'id': 1, 'language': 'en', 'forced': 'False', 'hi': 'False'},
                {'id': 2, 'language': 'hu', 'forced': 'False', 'hi': 'False', 'translate_from': 'en'}]
@@ -298,15 +304,40 @@ def test_automatic_source_legacy_translation_keeps_profile_eligibility(toolbox, 
     update_profile_id_list.invalidate()
     monkeypatch.setattr(settings.translator, 'min_source_wait_minutes', 0)
     context = tools.pipeline._episode(toolbox.world)
-    tools._sidecars(toolbox, context)
+    path, _ = tools._sidecars(toolbox, context)
+    caption = 'Une tasse de café, un gâteau à la crème et 20 €.'
+    path.write_bytes(tools.SRT.replace('Original cue', caption).replace('\n', newline).encode(encoding))
+    assert index_item(context.item_id) is not None
+
+    if metadata_error:
+        import errno
+        from subtitles.tools import subsync_engines
+
+        read = subsync_engines.read_regular_subtitle
+
+        def unreadable_version(*_args, **_kwargs):
+            raise OSError(errno.EIO, 'Could not read subtitle metadata')
+
+        def read_with_metadata_error(*args, **kwargs):
+            with monkeypatch.context() as fault:
+                fault.setattr(subsync_engines.os, 'lstat', unreadable_version)
+                return read(*args, **kwargs)
+
+        monkeypatch.setattr(subsync_engines, 'read_regular_subtitle', read_with_metadata_error)
 
     assert translation.queue_missing_translations(context) == {'hu'}
     job = toolbox.jobs._reserve_next_job()
     assert job.kwargs['source_tool'] is None and len(job.kwargs['expected_destination_versions']) == 2
-    assert toolbox.jobs._run_job(job)
 
     target = Path(context.path).with_suffix('.hu.srt')
-    assert 'Translated Original cue' in target.read_text()
+    if metadata_error:
+        assert not toolbox.jobs._run_job(job)
+        assert job.status == 'failed'
+        assert not target.exists()
+        assert translation.queue_missing_translations(context) == set()
+        return
+    assert toolbox.jobs._run_job(job)
+    assert f'Translated {caption}' in target.read_text(encoding='utf-8')
     (row,) = toolbox.db.execute(sa.select(repository.History)).all()
     assert (row.item_id, row.action, row.subtitles_path) == (context.item_id, 6, str(target))
 
