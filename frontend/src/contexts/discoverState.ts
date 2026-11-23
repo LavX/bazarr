@@ -124,6 +124,15 @@ export function discoverPageKey(
   ]);
 }
 
+export function discoverTitleKey(browsing: DiscoverBrowsing): string | null {
+  if (browsing.selectedId === null)
+    return browsing.retainedTitle?.source_id ?? browsing.adoptedSourceId;
+  const id = String(browsing.selectedId);
+  return browsing.selectedSource === "local" && id.startsWith("source:")
+    ? `source:${browsing.selectedType}:${id.slice("source:".length)}`
+    : `${browsing.selectedSource}:${browsing.selectedType}:${id}`;
+}
+
 export function initialDiscoverState(): DiscoverState {
   let language = "";
   let storageAvailable = true;
@@ -407,6 +416,8 @@ export function discoverContextKey(state: DiscoverSearchInput): string {
     // feedback and pending responses all belong to the copy that was chosen.
     draft.copyId ?? null,
     draft.copyId ? (copyLookupTmdbId(draft) ?? null) : null,
+    // Empty IMDb fields cannot distinguish catalog titles while details load.
+    draft.imdbId.trim() ? null : discoverTitleKey(state.browsing),
     recentMismatch,
   ]);
 }
@@ -540,8 +551,7 @@ export function discoverReducer(
     const browsing =
       action.type === "browsing" ? action.browsing : state.browsing;
     const changed =
-      (draft !== state.draft ||
-        browsing.recentContext !== state.browsing.recentContext) &&
+      (draft !== state.draft || browsing !== state.browsing) &&
       discoverContextKey(state) !== discoverContextKey({ draft, browsing });
     const cached = action.type === "draft" ? action.cached : undefined;
     return {

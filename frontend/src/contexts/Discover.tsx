@@ -43,6 +43,7 @@ import {
   discoverReducer,
   discoverSearchEligibility,
   DiscoverState,
+  discoverTitleKey,
   initialDiscoverState,
   mergeDiscoverBrowsing,
   offeredResults,
@@ -968,21 +969,58 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     [fetchPreview],
   );
 
-  const updateBrowsing = useCallback((changes: Partial<DiscoverBrowsing>) => {
-    const currentInput = searchInput.current;
-    const browsing = mergeDiscoverBrowsing(currentInput.browsing, changes);
-    const nextInput = { ...currentInput, browsing };
-    if (
-      browsing.recentContext !== currentInput.browsing.recentContext &&
-      discoverContextKey(nextInput) !== discoverContextKey(currentInput)
-    ) {
-      generation.current += 1;
-      downloadSequence.current += 1;
-      previewSequence.current += 1;
-    }
-    searchInput.current = nextInput;
-    dispatch({ type: "browsing", browsing, generation: generation.current });
-  }, []);
+  const updateBrowsing = useCallback(
+    (changes: Partial<DiscoverBrowsing>) => {
+      const currentInput = searchInput.current;
+      let browsing = mergeDiscoverBrowsing(currentInput.browsing, changes);
+      if (
+        browsing.selectedId !== null &&
+        discoverTitleKey(browsing) !== discoverTitleKey(currentInput.browsing)
+      ) {
+        // Retire the departed title before any details request can settle.
+        // A title with no IMDb id still owns its copy and catalog metadata.
+        updateDraft({
+          mediaType: browsing.selectedType === "show" ? "episode" : "movie",
+          imdbId: "",
+          copyTmdbId: undefined,
+          copyId: undefined,
+          title: undefined,
+          year: undefined,
+          showId:
+            browsing.selectedType === "show" &&
+            browsing.selectedSource === "tmdb"
+              ? Number(browsing.selectedId)
+              : undefined,
+          showTvdbId: undefined,
+          episodeIdentity: undefined,
+          manualEntry:
+            browsing.selectedSource === "tmdb" ? undefined : "numbers",
+          manualConfirmed: false,
+          season: "",
+          episode: "",
+        });
+        browsing = {
+          ...browsing,
+          identityLoaded: false,
+          adoptedSourceId: null,
+          adoptedMovieId: null,
+          retainedTitle: null,
+        };
+      }
+      const nextInput = { ...searchInput.current, browsing };
+      if (
+        discoverContextKey(nextInput) !==
+        discoverContextKey(searchInput.current)
+      ) {
+        generation.current += 1;
+        downloadSequence.current += 1;
+        previewSequence.current += 1;
+      }
+      searchInput.current = nextInput;
+      dispatch({ type: "browsing", browsing, generation: generation.current });
+    },
+    [updateDraft],
+  );
 
   const value = useMemo(
     () => ({

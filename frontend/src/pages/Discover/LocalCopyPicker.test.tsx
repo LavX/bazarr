@@ -201,6 +201,9 @@ beforeEach(() => {
         },
       }),
     ),
+    http.get("/api/system/status", () =>
+      HttpResponse.json({ bazarr_version: "test" }),
+    ),
     http.get("/api/system/languages", () =>
       HttpResponse.json([
         { name: "English", code3: "eng", code2: "en", enabled: false },
@@ -253,6 +256,8 @@ function Slots() {
       {JSON.stringify({
         focusId: state.browsing.focusId,
         pagePosition: state.browsing.pagePosition,
+        draft: state.draft,
+        browsing: state.browsing,
       })}
     </output>
   );
@@ -521,6 +526,140 @@ const movieCopy = {
   selectable: true,
   unavailable_reason: null,
 };
+
+it.each(["available", "failed"])(
+  "retires a TMDB-only movie's copy on a title click while new details are pending and then %s",
+  async (outcome) => {
+    const oldCopy = {
+      ...movieCopy,
+      copy_id: "c1.movie.5.s2",
+      arr_instance_id: null,
+      instance_name: null,
+      source_id: 2,
+      source_name: "Local films",
+    };
+    const nextCopy = {
+      ...oldCopy,
+      copy_id: "c1.movie.6.s2",
+      local_id: 6,
+      title: "Southern Cross",
+      release: "Southern.Cross.2021.1080p.WEB",
+      filename: "southern.cross.2021.mkv",
+    };
+    const nextMovie = {
+      ...movieDetail,
+      source_id: "tmdb:movie:201",
+      id: 201,
+      title: "Southern Cross",
+      year: 2021,
+      imdb_id: null,
+      copies: [{ local_id: 6, source_id: 2, arr_instance_id: null }],
+    };
+    let finishDetails: () => void = () => undefined;
+    const pending = new Promise<void>((resolve) => {
+      finishDetails = resolve;
+    });
+    let detailRequested = false;
+    copyPayload = { items: [oldCopy], truncated: false, owning_titles: 1 };
+    server.use(
+      http.get("/api/discover/metadata/movies/200", () =>
+        HttpResponse.json({
+          data: {
+            ...envelope,
+            item: {
+              ...movieDetail,
+              imdb_id: null,
+              copies: [{ local_id: 5, source_id: 2, arr_instance_id: null }],
+            },
+          },
+        }),
+      ),
+      http.get("/api/discover/metadata/search", () =>
+        HttpResponse.json({
+          data: { ...envelope, items: [{ ...nextMovie, copies: undefined }] },
+        }),
+      ),
+      http.get("/api/discover/metadata/movies/201", async () => {
+        detailRequested = true;
+        await pending;
+        return outcome === "failed"
+          ? new HttpResponse(null, { status: 503 })
+          : HttpResponse.json({ data: { ...envelope, item: nextMovie } });
+      }),
+    );
+
+    const { user, router } = browse("/discover?movie=200");
+    await pickOption(user, "Library copy", describeCopy(oldCopy));
+    await pickOption(user, "Subtitle language", "English");
+    const originalRequests = [...copyRequests];
+    expect(originalRequests).toHaveLength(1);
+    expect(originalRequests[0]).toContain("tmdb_id=200");
+
+    await user.type(screen.getByLabelText("Search"), "Southern");
+    await user.click(
+      await screen.findByRole("button", { name: "Southern Cross (2021)" }),
+    );
+    await waitFor(() => expect(detailRequested).toBe(true));
+    expect(router.state.location.search).toBe("?movie=201");
+    const { draft, browsing } = JSON.parse(
+      screen.getByTestId("slots").textContent!,
+    );
+    expect(draft).not.toHaveProperty("copyId");
+    expect(draft).not.toHaveProperty("copyTmdbId");
+    expect(draft).toMatchObject({
+      imdbId: "",
+      title: "Southern Cross",
+      year: 2021,
+    });
+    expect(draft).not.toHaveProperty("showId");
+    expect(draft).not.toHaveProperty("showTvdbId");
+    expect(draft).not.toHaveProperty("episodeIdentity");
+    expect(browsing.retainedTitle).toBeNull();
+    expect(browsing.adoptedSourceId).toBeNull();
+    expect(browsing.adoptedMovieId).toBeNull();
+    expect(screen.queryByText(/Chosen file:/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Find subtitles" }),
+    ).toBeDisabled();
+    expect(
+      queryClient.getQueryCache().findAll({
+        queryKey: COPIES_QUERY_KEY,
+        type: "active",
+      }),
+    ).toHaveLength(0);
+    expect(copyRequests).toEqual(originalRequests);
+    expect(searches).toEqual([]);
+
+    copyPayload = { items: [nextCopy], truncated: false, owning_titles: 1 };
+    finishDetails();
+    if (outcome === "available") {
+      expect(await ready()).toHaveValue("Title only, no library copy");
+      expect(copyRequests.at(-1)).toContain("tmdb_id=201");
+      expect(copyRequests.at(-1)).not.toContain("tmdb_id=200");
+      await pickOption(user, "Library copy", describeCopy(nextCopy));
+      await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+      await waitFor(() => expect(searches).toHaveLength(1));
+      expect(searches[0]).toMatchObject({
+        media_type: "movie",
+        tmdb_id: 201,
+        copy_id: nextCopy.copy_id,
+        title: "Southern Cross",
+        year: 2021,
+      });
+      expect(searches[0]).not.toHaveProperty("imdb_id");
+    } else {
+      expect(
+        await screen.findByText("Movie details are temporarily unavailable."),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Find subtitles" }),
+      ).toBeDisabled();
+      expect(screen.queryByText(/Chosen file:/)).not.toBeInTheDocument();
+      expect(copyRequests).toEqual(originalRequests);
+      expect(searches).toEqual([]);
+    }
+  },
+);
 
 it("searches a TMDB-only movie from a media source using an explicitly chosen file", async () => {
   const sourceCopy = {

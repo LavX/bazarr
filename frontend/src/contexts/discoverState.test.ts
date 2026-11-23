@@ -2,7 +2,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { DiscoverDraft } from "@/contexts/discoverState";
-import { episodeMatchesShow, searchSelection } from "@/contexts/discoverState";
+import {
+  discoverContextKey,
+  episodeMatchesShow,
+  initialDiscoverState,
+  searchSelection,
+} from "@/contexts/discoverState";
 import type { MetadataEpisode } from "@/types/discover";
 
 const episode: MetadataEpisode = {
@@ -229,6 +234,79 @@ describe("searchSelection", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("discoverContextKey", () => {
+  function unmappedMovie() {
+    const state = initialDiscoverState();
+    const draft: DiscoverDraft = {
+      mediaType: "movie",
+      imdbId: "",
+      title: "Shared title",
+      year: 2021,
+      language: "eng",
+      season: "",
+      episode: "",
+    };
+    return {
+      draft,
+      browsing: { ...state.browsing, selectedId: 200 },
+    };
+  }
+
+  it("separates empty-IMDb catalog movies with identical draft metadata", () => {
+    const first = unmappedMovie();
+    const second = {
+      ...first,
+      browsing: { ...first.browsing, selectedId: 201 },
+    };
+
+    expect(discoverContextKey(first)).not.toBe(discoverContextKey(second));
+  });
+
+  it.each(["tmdb", "local"] as const)(
+    "keeps the same %s title context for numeric and string selected IDs",
+    (selectedSource) => {
+      const state = unmappedMovie();
+      const numeric = {
+        ...state,
+        browsing: { ...state.browsing, selectedSource, selectedId: 200 },
+      };
+      const text = {
+        ...numeric,
+        browsing: { ...numeric.browsing, selectedId: "200" },
+      };
+
+      expect(discoverContextKey(numeric)).toBe(discoverContextKey(text));
+    },
+  );
+
+  it("separates source-folder movies and preserves the adopted title on Back", () => {
+    const state = unmappedMovie();
+    const selected = {
+      ...state,
+      browsing: {
+        ...state.browsing,
+        selectedSource: "local" as const,
+        selectedId: "source:5",
+      },
+    };
+    const other = {
+      ...selected,
+      browsing: { ...selected.browsing, selectedId: "source:6" },
+    };
+    const departed = {
+      ...selected,
+      browsing: {
+        ...selected.browsing,
+        selectedId: null,
+        adoptedSourceId: "source:movie:5",
+      },
+    };
+
+    expect(discoverContextKey(selected)).not.toBe(discoverContextKey(other));
+    expect(discoverContextKey(selected)).toBe(discoverContextKey(departed));
   });
 });
 
