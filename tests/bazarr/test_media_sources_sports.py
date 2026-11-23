@@ -183,6 +183,7 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
         if endpoint == 'wanted':
             assert selected[0]['missing_subtitles'][0]['code2'] == 'en'
             assert selected[0]['mapped_path'] == selected[0]['path']
+            assert all(selected[0][key] is None for key in ('arr_instance_id', 'sportarrLeagueId', 'sportarrEventId'))
         assert get(endpoint, **{'source_key[]': f'source:{owner}'}).get_json()['total'] == 0
         assert get(endpoint, sources=1, arr_instance_id=3).get_json()['total'] == 1
 

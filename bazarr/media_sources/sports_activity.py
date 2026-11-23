@@ -42,7 +42,8 @@ def _source_wanted(row):
     return postprocess_source({
         'id': row.id, 'source_id': row.source_id, 'source_item_id': row.id, 'source_group_id': row.group_id,
         'source_name': row.source_name, 'source_kind': row.source_kind, 'identity_state': row.identity_state,
-        'arr_instance_id': None, 'league_id': None, 'leagueTitle': row.league_title, 'title': row.title,
+        'arr_instance_id': None, 'league_id': None, 'sportarrLeagueId': None, 'sportarrEventId': None, 'file_id': None,
+        'leagueTitle': row.league_title, 'title': row.title,
         'season': row.season, 'episode': row.episode, 'eventDate': row.event_date, 'broadcastDate': None,
         'partNumber': row.part_number or None, 'partName': row.part_name,
         'path': row.path, 'mapped_path': row.path, 'hasFile': True, 'release_mismatch': False,
