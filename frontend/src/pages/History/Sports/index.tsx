@@ -52,6 +52,7 @@ export const SPORTS_HISTORY_ACTIONS: [string, string][] = [
   ["5", "Synced"],
   ["6", "Translated"],
   ["8", "Extracted"],
+  ["9", "Manual score"],
 ];
 
 // An exclusion deletes a file, so it asks first. Same wording the old combined

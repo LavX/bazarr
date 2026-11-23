@@ -1,7 +1,6 @@
-/* eslint-disable camelcase -- API fixtures use the server's field names. */
 /**
  * The tools menu offers a manual score for the subtitle files listed for a
- * movie or an episode, and for nothing else.
+ * movie, episode or sports event.
  */
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
@@ -46,17 +45,17 @@ describe("SubtitleToolsMenu score item", () => {
     ).toBeEnabled();
   });
 
-  it("leaves the item out for a sports event", async () => {
-    await openMenu(
+  it("offers Set Score for a sports file and opens the score form", async () => {
+    const user = await openMenu(
       <SubtitleToolsMenu selections={file("sports")}>
         <button type="button">Tools</button>
       </SubtitleToolsMenu>,
     );
 
-    await screen.findByRole("menuitem", { name: "Sync..." });
-    expect(
-      screen.queryByRole("menuitem", { name: "Set Score..." }),
-    ).not.toBeInTheDocument();
+    const item = await screen.findByRole("menuitem", { name: "Set Score..." });
+    expect(item).toBeEnabled();
+    await user.click(item);
+    expect(await screen.findByText("Set Subtitle Score")).toBeInTheDocument();
   });
 
   it("leaves the item out for a missing subtitle", async () => {
@@ -81,18 +80,21 @@ describe("SubtitleToolsMenu score item", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("disables the item for an embedded track, which has no file to score", async () => {
-    await openMenu(
-      <SubtitleToolsMenu
-        selections={[{ type: "movie", id: 5, path: "", language: "en" }]}
-        embeddedTrack={{ codec: "subrip" }}
-      >
-        <button type="button">Tools</button>
-      </SubtitleToolsMenu>,
-    );
+  it.each(["movie", "sports"] as const)(
+    "disables the item for an embedded %s track, which has no file to score",
+    async (type) => {
+      await openMenu(
+        <SubtitleToolsMenu
+          selections={[{ type, id: 5, path: "", language: "en" }]}
+          embeddedTrack={{ codec: "subrip" }}
+        >
+          <button type="button">Tools</button>
+        </SubtitleToolsMenu>,
+      );
 
-    expect(
-      await screen.findByRole("menuitem", { name: "Set Score..." }),
-    ).toBeDisabled();
-  });
+      expect(
+        await screen.findByRole("menuitem", { name: "Set Score..." }),
+      ).toBeDisabled();
+    },
+  );
 });

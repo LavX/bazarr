@@ -37,9 +37,7 @@ const ScoreOverrideForm: FunctionComponent<Props> = ({
     <form
       onSubmit={form.onSubmit(({ score }) => {
         selections.forEach((s) => {
-          // The endpoint scores movies and episodes only, and only a file
-          // that is listed for the item.
-          if (s.type === "sports" || !s.path) return;
+          if (!s.path) return;
           mutate({
             type: s.type,
             id: s.id,

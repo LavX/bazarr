@@ -335,13 +335,8 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   const toolGroups = useToolGroups();
   const modals = useModals();
 
-  // A manual score is kept for the files listed for a movie or an episode. A
-  // sports event, a combined output and a missing subtitle have none, so the
-  // group is left out for them.
-  const hasScoreGroup =
-    !isCombinedOutput &&
-    !missingLanguage &&
-    !selections.some((s) => s.type === "sports");
+  // A manual score belongs to an existing subtitle file.
+  const hasScoreGroup = !isCombinedOutput && !missingLanguage;
   const visibleGroups = toolGroups.filter(
     (group) => group.label !== "Score" || hasScoreGroup,
   );

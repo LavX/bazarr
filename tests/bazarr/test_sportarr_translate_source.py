@@ -122,6 +122,23 @@ def test_a_download_after_a_hand_upload_is_held_to_the_threshold(sports_history,
     assert _source_score_below_threshold(_context(), 'hu') is True
 
 
+@pytest.mark.parametrize('source_action,rejected', [(4, False), (1, True)])
+def test_a_zero_score_override_preserves_the_translation_sources_origin(
+    sports_history, monkeypatch, source_action, rejected
+):
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    _history_rows(session, history, [
+        ('hu', source_action, None if source_action == 4 else 180, '/sports/race.hu.srt'),
+        ('hu', 9, 0, '/sports/race.hu.srt'),
+    ])
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.srt') is rejected
+
+
 def test_a_hand_upload_of_another_language_does_not_vouch_for_this_one(sports_history, monkeypatch):
     from datetime import timedelta
 

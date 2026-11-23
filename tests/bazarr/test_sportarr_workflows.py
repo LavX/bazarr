@@ -2056,6 +2056,69 @@ def test_sports_upgrade_marker_uses_the_latest_history_row_including_ties(workfl
     assert workflows.upgrade_rows(session, 1) == []
 
 
+@pytest.mark.parametrize("pin_same_path", [True, False], ids=["same-path", "other-path"])
+def test_sports_score_pin_blocks_only_its_file_until_a_newer_provider_download(
+    workflow_library, monkeypatch, pin_same_path
+):
+    from datetime import datetime, timedelta
+
+    from app.config import settings
+    from app.database import TableHistorySports, TableSportsEvents
+    from sportarr.library import get_event, list_events
+    from subtitles.score_override import set_score_override
+    import subtitles.score_override as score_override
+
+    automatic, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    monkeypatch.setattr(settings.general, "upgrade_manual", True)
+    monkeypatch.setattr(settings.general, "upgrade_translated", False)
+    monkeypatch.setattr(settings.general, "days_to_upgrade_subs", 30)
+    automatic.search_event(61, 1)
+    candidate = session.execute(sa.select(TableHistorySports)).scalar_one()
+    candidate.score = 1
+    candidate.timestamp = datetime.now() - timedelta(hours=1)
+    session.get(TableSportsEvents, 61).subtitles = str([
+        ["en", "/sports/event.en.srt", 100],
+        ["en", "/sports/event.alt.en.srt", 100],
+    ])
+    session.commit()
+    pin_path = "/sports/event.en.srt" if pin_same_path else "/sports/event.alt.en.srt"
+    set_score_override(session, "sports", 61, pin_path, 0)
+    pin = session.execute(
+        sa.select(TableHistorySports).where(TableHistorySports.action == 9)
+    ).scalar_one()
+    expected = set() if pin_same_path else {candidate.id}
+
+    assert workflows.upgradable_history_ids(session, [candidate.id, pin.id]) == expected
+    assert {row["id"] for row in workflows.upgrade_rows(session, 1)} == expected
+    searches = []
+
+    def search(event_id, owner, **kwargs):
+        searches.append((event_id, owner, kwargs["upgraded_from_id"], kwargs["minimum_score"]))
+        return {"status": "no_result", "downloads": 0, "message": "No replacement"}
+
+    monkeypatch.setattr(workflows, "search_event", search)
+    workflows.upgrade_sports_subtitles(job_id="score-pin", arr_instance_id=1)
+    assert searches == ([] if pin_same_path else [(61, 1, candidate.id, 2)])
+
+    if pin_same_path:
+        replacement = TableHistorySports(
+            arr_instance_id=1, league_id=51, event_id=61, language="en", action=1,
+            provider=candidate.provider, score=1, score_out_of=180,
+            subtitles_path=candidate.subtitles_path, video_path=candidate.video_path,
+            artifact=candidate.artifact, timestamp=pin.timestamp + timedelta(seconds=1),
+        )
+        session.add(replacement)
+        session.commit()
+        assert workflows.upgradable_history_ids(
+            session, [candidate.id, pin.id, replacement.id]
+        ) == {replacement.id}
+        assert [row["id"] for row in workflows.upgrade_rows(session, 1)] == [replacement.id]
+        assert get_event(session, 61, 1).get("manual_subtitle_scores", {}) == {}
+        assert list_events(session, 51, 1)["data"][0].get("manual_subtitle_scores", {}) == {}
+
+
 def test_an_older_history_row_is_not_flagged_upgradable(workflow_library, monkeypatch):
     """The flag has to agree with the run, or it promises an upgrade forever.
 

@@ -198,6 +198,48 @@ it("shows the score as a percentage of what was available", async () => {
   ).toBeInTheDocument();
 });
 
+it("shows a zero manual score with upgrade eligibility and filters by its action", async () => {
+  owners();
+  const user = userEvent.setup();
+  let actionFilter: string | null = null;
+  server.use(
+    http.get("/api/sports/history", ({ request }) => {
+      actionFilter = new URL(request.url).searchParams.get("action");
+      return HttpResponse.json({
+        data: [
+          {
+            ...record,
+            action: 9,
+            score: 0,
+            score_out_of: 100,
+            provider: null,
+            subs_id: null,
+            upgradable: true,
+          },
+        ],
+        total: 1,
+      });
+    }),
+  );
+  customRender(<SportsHistoryView />);
+
+  expect(
+    await screen.findByText("0%", undefined, { timeout: 8000 }),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Manual Score")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Exclude" })).toBeNull();
+  await user.click(screen.getByRole("combobox", { name: "Action" }));
+  await user.click(await screen.findByRole("option", { name: "Manual score" }));
+  await waitFor(() => expect(actionFilter).toBe("9"));
+  // eslint-disable-next-line testing-library/no-node-access
+  const upgrade = document.querySelector(".fa-recycle");
+  expect(upgrade).not.toBeNull();
+  await user.hover(upgrade as Element);
+  expect(
+    await screen.findByText("This Subtitle File Is Eligible For An Upgrade."),
+  ).toBeInTheDocument();
+});
+
 it("does not request history when every owner is disabled", async () => {
   owners(false);
   let calls = 0;
