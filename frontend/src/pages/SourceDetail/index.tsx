@@ -40,7 +40,6 @@ import {
   sourceError,
   SourceGroup,
   SourceItem,
-  sourceNotFound,
   useSourceEpisodes,
   useSourceGroup,
   useSourceItem,
@@ -357,7 +356,7 @@ export function SourceSubtitleTable({ item }: { item: SourceItem }) {
 
 function SourceEpisodeView({ item }: { item: SourceItem }) {
   const query = useSourceItem(item.id, item.kind);
-  if (item.kind === "sports_event" && sourceNotFound(query.error)) {
+  if (query.data === null) {
     return (
       <Alert color="red" role="alert">
         This event is no longer available.
@@ -395,10 +394,8 @@ function SourceSportsEventTitle({
 }: {
   event: Pick<SourceItem, "id" | "title">;
 }) {
-  const { data, error } = useSourceItem(event.id, "sports_event");
-  return sourceNotFound(error)
-    ? "Event unavailable"
-    : (data?.title ?? event.title);
+  const { data } = useSourceItem(event.id, "sports_event");
+  return data === null ? "Event unavailable" : (data?.title ?? event.title);
 }
 
 function SourceLeagueEvents({ id }: { id: number }) {
@@ -460,7 +457,7 @@ function SourceLeagueEvents({ id }: { id: number }) {
     ],
     [modals],
   );
-  if (sourceNotFound(query.error)) {
+  if (query.data === null) {
     return (
       <Alert color="red" role="alert">
         These events are no longer available.
@@ -665,8 +662,8 @@ export function SourceSeriesDetailView() {
 export function SourceLeagueDetailView() {
   const id = validId(useParams().id);
   const query = useSourceGroup(id, "league");
-  const unavailable = sourceNotFound(query.error);
-  const item = unavailable ? undefined : query.data;
+  const item = query.data;
+  const unavailable = item === null;
   useDocumentTitle(
     `${item?.title ?? "Unknown League"} - ${useAppTitle()} (Sports)`,
   );

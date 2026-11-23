@@ -488,15 +488,14 @@ it("cancels an unknown-owner event list's first fetch before refreshing after re
       library: source.libraries[0],
     });
   });
-  await waitFor(() => expect(result.current.events.isError).toBe(true));
-  expect(result.current.events.data).toBeUndefined();
+  await waitFor(() => expect(result.current.events.data).toBeNull());
   expect(fetchEvents.mock.calls[0][1]?.aborted).toBe(true);
   expect(reads).toBe(2);
   await act(async () => {
     releaseFirst();
     await Promise.resolve();
   });
-  expect(result.current.events.data).toBeUndefined();
+  expect(result.current.events.data).toBeNull();
   fetchEvents.mockRestore();
   unmount();
 });

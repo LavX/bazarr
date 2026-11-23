@@ -1,5 +1,10 @@
 /* eslint-disable camelcase */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryFunctionContext,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { useMediaSources } from "@/apis/hooks/mediaSources";
@@ -258,6 +263,45 @@ class SourceDetailApi extends BaseApi {
 
 export const sourceDetailApi = new SourceDetailApi();
 
+type SourceOwner = Pick<SourceGroup, "source_id" | "library_id">;
+type UnavailableSportsDetail = Partial<SourceOwner> & { unavailable: true };
+type SportsDetail<T> = T | UnavailableSportsDetail;
+
+async function readSportsDetail<T extends SourceOwner | SourceOwner[]>(
+  { client, queryKey }: QueryFunctionContext,
+  call: () => Promise<T>,
+): Promise<SportsDetail<T>> {
+  try {
+    return await withInlineErrors(call);
+  } catch (error) {
+    if (!isAxiosError(error) || error.response?.status !== 404) throw error;
+    // Keep only the owner so invalidation stays scoped after removal.
+    const cached =
+      client.getQueryData<SportsDetail<SourceOwner | SourceOwner[]>>(queryKey);
+    const owner = Array.isArray(cached) ? cached[0] : cached;
+    return owner?.source_id === undefined
+      ? { unavailable: true }
+      : {
+          unavailable: true,
+          source_id: owner.source_id,
+          library_id: owner.library_id,
+        };
+  }
+}
+
+function sportsDetailOptions<T extends SourceOwner | SourceOwner[]>() {
+  return {
+    select: (data: SportsDetail<T>): T | null =>
+      "unavailable" in data ? null : data,
+    refetchOnMount: ({
+      state,
+    }: {
+      state: { data: SportsDetail<T> | undefined };
+    }): true | "always" =>
+      state.data && "unavailable" in state.data ? "always" : true,
+  };
+}
+
 export function useSourceOwnerAvailable(
   item: Pick<SourceGroup, "source_id" | "library_id">,
 ) {
@@ -274,9 +318,14 @@ export function useSourceOwnerAvailable(
 
 export function useSourceGroup(id: number, kind: SourceGroup["kind"] = "show") {
   return useQuery({
+    ...sportsDetailOptions<SourceGroup>(),
     queryKey: sourceDetailKeys.group(id, kind),
-    queryFn: ({ signal }) =>
-      withInlineErrors(() => sourceDetailApi.group(id, signal, kind)),
+    queryFn: (context) => {
+      const read = () => sourceDetailApi.group(id, context.signal, kind);
+      return kind === "league"
+        ? readSportsDetail(context, read)
+        : withInlineErrors(read);
+    },
     enabled: Number.isSafeInteger(id) && id > 0,
     placeholderData: undefined,
     retry: false,
@@ -285,9 +334,14 @@ export function useSourceGroup(id: number, kind: SourceGroup["kind"] = "show") {
 
 export function useSourceItem(id: number, kind: SourceItem["kind"] = "movie") {
   return useQuery({
+    ...sportsDetailOptions<SourceItem>(),
     queryKey: sourceDetailKeys.item(id, kind),
-    queryFn: ({ signal }) =>
-      withInlineErrors(() => sourceDetailApi.item(id, signal, kind)),
+    queryFn: (context) => {
+      const read = () => sourceDetailApi.item(id, context.signal, kind);
+      return kind === "sports_event"
+        ? readSportsDetail(context, read)
+        : withInlineErrors(read);
+    },
     enabled: Number.isSafeInteger(id) && id > 0,
     placeholderData: undefined,
     retry: false,
@@ -296,10 +350,14 @@ export function useSourceItem(id: number, kind: SourceItem["kind"] = "movie") {
 
 export function useSourceLeagueEvents(id: number) {
   return useQuery({
+    ...sportsDetailOptions<SourceItem[]>(),
     queryKey: sourceDetailKeys.leagueEvents(id),
-    queryFn: ({ signal }) =>
-      withInlineErrors(() => sourceDetailApi.leagueEvents(id, signal)),
+    queryFn: (context) =>
+      readSportsDetail(context, () =>
+        sourceDetailApi.leagueEvents(id, context.signal),
+      ),
     enabled: Number.isSafeInteger(id) && id > 0,
+    placeholderData: undefined,
     retry: false,
   });
 }
@@ -376,10 +434,6 @@ export function useSourceScan() {
       ),
     onSuccess: (job) => refreshWhenJobFinishes(client, job.job_id, refresh),
   });
-}
-
-export function sourceNotFound(error: unknown) {
-  return isAxiosError(error) && error.response?.status === 404;
 }
 
 export function sourceError(error: unknown) {

@@ -228,7 +228,7 @@ it("keeps manual Sports tools available for an unprofiled, shadowed recording", 
 });
 
 it.each(["league", "event list", "event dialog"] as const)(
-  "hides cached %s data after a not-found response",
+  "keeps confirmed %s absence through a failed revisit and restores it on success",
   async (removed) => {
     const user = userEvent.setup();
     const league = { ...movie, kind: "league", title: "Cached league" };
@@ -240,26 +240,34 @@ it.each(["league", "event list", "event dialog"] as const)(
       title: "Cached race",
       season: 2026,
     };
-    let refetch = false;
-    function notFound() {
-      return HttpResponse.json({ error: "not_found" }, { status: 404 });
+    const restoredLeague = { ...league, title: "Restored league" };
+    const restoredEvent = { ...event, title: "Restored race" };
+    let status = 200;
+    let restored = false;
+    const readDetail = vi.fn();
+    function respond(resource: typeof removed, data: object) {
+      if (resource === removed) {
+        readDetail(status);
+        if (status !== 200)
+          return HttpResponse.json({ error: "request_failed" }, { status });
+      }
+      return HttpResponse.json(data);
     }
     server.use(
       http.get("/api/sources/groups/7", () =>
-        refetch && removed === "league"
-          ? notFound()
-          : HttpResponse.json(league),
+        respond("league", restored ? restoredLeague : league),
       ),
       http.get("/api/sources/groups/7/items", () =>
-        refetch && removed !== "event dialog"
-          ? notFound()
-          : HttpResponse.json({ data: [event], total: 1 }),
+        respond("event list", {
+          data: [restored && removed === "event list" ? restoredEvent : event],
+          total: 1,
+        }),
       ),
       http.get("/api/sources/items/60", () =>
-        refetch ? notFound() : HttpResponse.json(event),
+        respond("event dialog", restored ? restoredEvent : event),
       ),
     );
-    openPage("sports");
+    const { unmount } = openPage("sports");
     const race = await screen.findByRole("button", { name: event.title });
     if (removed === "event dialog") {
       await user.click(race);
@@ -284,32 +292,57 @@ it.each(["league", "event list", "event dialog"] as const)(
         : removed === "event list"
           ? sourceDetailKeys.leagueEvents(7)
           : sourceDetailKeys.item(60, "sports_event");
-    refetch = true;
+    const unavailableMessage = {
+      league: "This league is no longer available.",
+      "event list": "These events are no longer available.",
+      "event dialog": "This event is no longer available.",
+    }[removed];
+    status = 404;
     await act(async () => {
       await invalidateSourceDetails(queryClient, {
         sourceId: 3,
         libraryId: 11,
       });
     });
+    expect(await screen.findByText(unavailableMessage)).toBeVisible();
+    readDetail.mockClear();
+    await act(async () => {
+      await invalidateSourceDetails(queryClient, {
+        sourceId: 3,
+        libraryId: 12,
+      });
+    });
+    expect(readDetail).not.toHaveBeenCalled();
+
+    status = 503;
+    if (removed === "event dialog") {
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      await user.click(
+        await screen.findByRole("button", { name: event.title }),
+      );
+    } else {
+      unmount();
+      openPage("sports");
+    }
     await waitFor(() =>
-      expect(queryClient.getQueryState(key)?.status).toBe("error"),
+      expect(queryClient.getQueryState(key)?.error).toMatchObject({
+        response: { status: 503 },
+      }),
     );
-    expect(queryClient.getQueryData(key)).toBeDefined();
+    expect(screen.getByText(unavailableMessage)).toBeVisible();
 
     if (removed === "event dialog") {
-      const dialog = within(screen.getByRole("dialog"));
+      const dialog = within(
+        screen.getByRole("dialog", { name: "Event unavailable" }),
+      );
       expect(
-        dialog.queryByRole("button", { name: "Manual Search" }),
+        dialog.queryByRole("button", { name: "Change Profile" }),
+      ).not.toBeInTheDocument();
+      expect(
+        dialog.queryByRole("button", { name: "Identity fix" }),
       ).not.toBeInTheDocument();
       expect(dialog.queryByText("movie.en.hi.srt")).not.toBeInTheDocument();
-      expect(screen.getByRole("dialog")).toHaveAccessibleName(
-        "Event unavailable",
-      );
-      expect(dialog.getByRole("alert")).toBeVisible();
-      await user.keyboard("{Escape}");
-      expect(
-        await screen.findByRole("button", { name: event.title }),
-      ).toBeVisible();
     } else {
       expect(
         screen.queryByRole("button", { name: event.title }),
@@ -325,6 +358,36 @@ it.each(["league", "event list", "event dialog"] as const)(
       }
       expect(screen.getByRole("alert")).toBeVisible();
     }
+
+    restored = true;
+    status = 200;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: key, exact: true });
+    });
+    if (removed === "event dialog") {
+      const dialog = within(
+        await screen.findByRole("dialog", { name: restoredEvent.title }),
+      );
+      expect(
+        dialog.getByRole("button", { name: "Change Profile" }),
+      ).toBeVisible();
+      expect(
+        dialog.getByRole("button", { name: "Identity fix" }),
+      ).toBeVisible();
+      expect(dialog.getByText("movie.en.hi.srt")).toBeVisible();
+    } else if (removed === "league") {
+      expect(
+        await screen.findByRole("heading", { name: restoredLeague.title }),
+      ).toBeVisible();
+      expect(
+        await screen.findByRole("button", { name: event.title }),
+      ).toBeVisible();
+    } else {
+      expect(
+        await screen.findByRole("button", { name: restoredEvent.title }),
+      ).toBeVisible();
+    }
+    expect(screen.queryByText(unavailableMessage)).not.toBeInTheDocument();
   },
 );
 
