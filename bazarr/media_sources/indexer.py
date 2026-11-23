@@ -97,13 +97,13 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
         owners = {}
         for path in paths:
             mapped = os.path.normcase(os.path.realpath(path))
-            folders = {os.path.dirname(mapped)}
+            media_directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
+            folders = {media_directory}
             if absolute_folder:
                 folders.add(absolute_folder)
             elif subfolder == 'relative' and custom_folder:
-                folders.add(os.path.normcase(os.path.realpath(os.path.join(os.path.dirname(mapped),
-                                                                         custom_folder))))
-            stem = _normalized_media_stem(mapped)
+                folders.add(os.path.normcase(os.path.realpath(os.path.join(media_directory, custom_folder))))
+            stem = _normalized_media_stem(path)
             for folder in folders:
                 owners.setdefault((folder, stem), set()).add(mapped)
         return owners

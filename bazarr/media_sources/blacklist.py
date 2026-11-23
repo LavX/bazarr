@@ -29,12 +29,13 @@ def list_blacklist(session, args, arr, arr_table, kind, model):
             sa.cast(sa.null(), sa.Integer).label('source_group_id'),
             sa.cast(sa.null(), sa.Text).label('source_name'),
             sa.cast(sa.null(), sa.Text).label('source_kind'),
+            sa.cast(sa.null(), sa.Text).label('removal_key'),
             sa.cast(sa.null(), sa.Text).label('video_path'))
         src = sa.select(
             blacklist.c.id, blacklist.c.id.label('_blacklist_id'), blacklist.c.source_id.label('_owner'),
             blacklist.c.item_id.label('source_item_id'), items.c.group_id.label('source_group_id'),
             sa.func.coalesce(sources.c.name, blacklist.c.source_name).label('source_name'),
-            sources.c.kind.label('source_kind'), blacklist.c.video_path,
+            sources.c.kind.label('source_kind'), blacklist.c.removal_key, blacklist.c.video_path,
             blacklist.c.provider, blacklist.c.subs_id, blacklist.c.language, blacklist.c.timestamp,
         ).select_from(blacklist.outerjoin(items, blacklist.c.item_id == items.c.id)
                       .outerjoin(sources, blacklist.c.source_id == sources.c.id)
@@ -64,8 +65,21 @@ def list_blacklist(session, args, arr, arr_table, kind, model):
                 origin=row.origin, source_key=row.source_key, source_item_id=row.source_item_id,
                 source_group_id=row.source_group_id, source_name=row.source_name, source_kind=row.source_kind,
                 source_id=row._owner if row.origin == 'source' else None, video_path=row.video_path)
+            if row.origin == 'source':
+                parsed['removal_key'] = row.removal_key
         data.append(parsed)
-    return {'data': data, 'total': total} if mixed else {'data': data}
+    if not mixed:
+        return {'data': data}
+    # Options describe every retained exclusion of this kind, independently of
+    # the selected owners and this page, including sources with no libraries.
+    owners = session.execute(sa.select(
+        blacklist.c.source_id, sa.func.max(sa.func.coalesce(sources.c.name, blacklist.c.source_name)).label('name')
+    ).select_from(blacklist.outerjoin(sources, blacklist.c.source_id == sources.c.id))
+        .where(kind_condition).group_by(blacklist.c.source_id).order_by(blacklist.c.source_id.asc().nulls_last())).all()
+    source_filters = [{'key': f'source:{owner.source_id}', 'name': owner.name or 'Media source'}
+                      if owner.source_id is not None else {'key': 'source:removed', 'name': 'Removed sources'}
+                      for owner in owners]
+    return {'data': data, 'total': total, 'source_filters': source_filters}
 
 
 def add_blacklist_delete_arguments(parser):
@@ -73,6 +87,7 @@ def add_blacklist_delete_arguments(parser):
 
     add_source_arguments(parser)
     parser.add_argument('source_blacklist_id', type=int, location='args', help='The source blacklist entry ID')
+    parser.add_argument('source_blacklist_key', location='args', help='The source entry removal key from its listing')
 
 
 def delete_blacklist(args, *, session, kind, arr_table, delete_one, delete_all):
@@ -80,13 +95,17 @@ def delete_blacklist(args, *, session, kind, arr_table, delete_one, delete_all):
     blacklist = repository.Blacklist
     kind_condition = blacklist.c.item_kind == kind
     row_id = args.get('source_blacklist_id')
+    removal_key = args.get('source_blacklist_key')
     all_rows = args.get('all') == 'true'
     mixed = args.get('sources') == '1'
     key_filter = SourceKeyFilter(tuple(args.get('source_key[]') or ()))
-    if row_id is not None:
-        if not mixed or all_rows or row_id <= 0:
-            return {'message': 'A source blacklist entry requires sources=1 and a positive entry ID.'}, 400
-        session.execute(sa.delete(blacklist).where(kind_condition, blacklist.c.id == row_id))
+    if row_id is not None or removal_key is not None:
+        if not mixed or all_rows or row_id is None or row_id <= 0 or not removal_key:
+            return {'message': 'A source blacklist entry requires sources=1, a positive entry ID and its removal key.'}, 400
+        removed = session.execute(sa.delete(blacklist).where(
+            kind_condition, blacklist.c.id == row_id, blacklist.c.removal_key == removal_key)).rowcount
+        if not removed:
+            return {'message': 'This exclusion changed or was removed. Refresh the list and try again.'}, 409
     elif all_rows:
         if not mixed and not key_filter.keys:
             delete_all()

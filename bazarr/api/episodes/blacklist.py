@@ -140,6 +140,8 @@ class EpisodesBlacklist(Resource):
 
     @authenticate
     @api_ns_episodes_blacklist.doc(parser=delete_request_parser)
+    @api_ns_episodes_blacklist.response(400, 'Incomplete source exclusion identity')
+    @api_ns_episodes_blacklist.response(409, 'The source exclusion changed or was removed')
     @api_ns_episodes_blacklist.response(204, 'Success')
     @api_ns_episodes_blacklist.response(401, 'Not Authenticated')
     def delete(self):

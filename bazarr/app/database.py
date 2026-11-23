@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import uuid
 import flask_migrate
 
 from dogpile.cache import make_region
@@ -1219,6 +1220,7 @@ class TableSourceBlacklist(Base):
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    removal_key = mapped_column(Text, nullable=False, default=lambda: uuid.uuid4().hex)
     item_id = mapped_column(Integer, ForeignKey('table_source_items.id', ondelete='SET NULL'))
     source_id = mapped_column(Integer, ForeignKey('media_sources.id', ondelete='SET NULL'))
     item_kind = mapped_column(Text, nullable=False)

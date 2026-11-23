@@ -1,5 +1,16 @@
 type BlacklistRow = Blacklist.Movie | Blacklist.Episode;
 
+export function blacklistSourceLabels(
+  configured: Map<MediaSourceKey, string>,
+  options: Blacklist.SourceOption[],
+) {
+  const labels = new Map(configured);
+  for (const option of options) {
+    if (!labels.has(option.key)) labels.set(option.key, option.name);
+  }
+  return labels;
+}
+
 export function blacklistRowId(row: BlacklistRow, index: number) {
   // Several Arr exclusions can share a media ID.
   return row.origin === "source"
@@ -8,7 +19,12 @@ export function blacklistRowId(row: BlacklistRow, index: number) {
 }
 
 export function blacklistRowRemoval(row: BlacklistRow): Blacklist.Removal {
-  if (row.origin === "source") return { sourceBlacklistId: row.id };
+  if (row.origin === "source") {
+    return {
+      sourceBlacklistId: row.id,
+      sourceBlacklistKey: row.removal_key,
+    };
+  }
   return {
     all: false,
     form: {

@@ -10,6 +10,8 @@ import {
 import { useAppTitle } from "@/apis/hooks/site";
 import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
+import { blacklistSourceLabels } from "@/pages/Blacklist/row";
+import useSourceOptions from "@/pages/Blacklist/useSourceOptions";
 import SourceFilter from "@/pages/views/SourceFilter";
 import Table from "./table";
 
@@ -18,6 +20,7 @@ const BlacklistMoviesView: FunctionComponent = () => {
     includeDisabledSources: true,
   });
   const { selected, includeSources, labels, onChange } = filter;
+  const sourceOptions = useSourceOptions("movie", includeSources);
   const scope: Blacklist.Scope = {
     includeSources,
     sourceKeys: selected ? [selected] : undefined,
@@ -42,7 +45,10 @@ const BlacklistMoviesView: FunctionComponent = () => {
               Remove All
             </Toolbox.MutateButton>
             <SourceFilter
-              labels={labels}
+              labels={blacklistSourceLabels(
+                labels,
+                includeSources ? (sourceOptions.data ?? []) : [],
+              )}
               value={selected}
               onChange={onChange}
               includeSources={includeSources}

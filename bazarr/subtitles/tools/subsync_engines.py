@@ -399,11 +399,11 @@ class SyncOutputOwnerIndex:
                                if media_type == 'sports' else path_mappings.path_replace_instance(
                                    row.path, row.arr_instance_id, media_type))
                 mapped = os.path.normcase(os.path.realpath(mapped_path))
-                folders = {os.path.dirname(mapped)}
-                custom_folder = get_target_folder(mapped, create=False)
+                folders = {os.path.normcase(os.path.realpath(os.path.dirname(mapped_path)))}
+                custom_folder = get_target_folder(mapped_path, create=False)
                 if custom_folder:
                     folders.add(os.path.normcase(os.path.realpath(custom_folder)))
-                stem = _normalized_media_stem(mapped)
+                stem = _normalized_media_stem(mapped_path)
                 for folder in folders:
                     owners.setdefault((folder, stem), set()).add(mapped)
         return owners
@@ -437,22 +437,26 @@ def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
 
     video = os.path.normcase(os.path.realpath(video_path))
     directory = os.path.normcase(os.path.realpath(os.path.dirname(source_path)))
-    media_directory = os.path.dirname(video)
+    media_directory = os.path.normcase(os.path.realpath(os.path.dirname(video_path)))
 
     stem = _normalized_media_stem
-    if stem(source_path) != stem(video) and not stem(source_path).startswith(stem(video) + '.'):
+    # Sidecars follow the admitted filename, even when it is a symlink with a
+    # different target name. Physical paths identify owners, never sidecar names.
+    if stem(source_path) != stem(video_path) and not stem(source_path).startswith(stem(video_path) + '.'):
         return False
-    conflicting_stems = (ownership_index.conflicting_stems(video, source_path) if ownership_index is not None
-                         else {stem(video), stem(source_path)})
+    conflicting_stems = (ownership_index.conflicting_stems(video_path, source_path) if ownership_index is not None
+                         else {stem(video_path), stem(source_path)})
     try:
         with os.scandir(media_directory) as entries:
-            local_videos = {os.path.normcase(os.path.realpath(entry.path)) for entry in entries
+            local_videos = {(stem(entry.path), os.path.normcase(os.path.realpath(entry.path))) for entry in entries
                             if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS)}
-        if any(path != video and stem(path) in conflicting_stems for path in local_videos):
+        if (stem(video_path), video) not in local_videos:
+            return False
+        if any(path != video and name in conflicting_stems for name, path in local_videos):
             return False
         if directory == media_directory and (ownership_index is None or not ownership_index.folder_is_shared(
                 directory)):
-            return video in local_videos
+            return True
 
         # Separate media directories can share a custom subtitle folder. Keep
         # all mapped owners, amortizing that lookup only within an explicit scan.

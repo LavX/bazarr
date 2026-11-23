@@ -19,6 +19,13 @@ class MovieApi extends BaseApi {
     await this.post("/blacklist", form, { radarrid });
   }
 
+  async blacklistSourceOptions(signal?: AbortSignal) {
+    const response = await this.get<{
+      source_filters?: Blacklist.SourceOption[];
+    }>("/blacklist", { sources: 1, length: 1 }, signal);
+    return response.source_filters ?? [];
+  }
+
   async deleteBlacklist(removal: Blacklist.Removal) {
     const { form, params } = blacklistRemovalRequest(removal);
     await this.delete("/blacklist", form, params);
