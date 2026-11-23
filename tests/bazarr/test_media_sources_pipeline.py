@@ -3692,6 +3692,57 @@ def test_source_combine_rechecks_input_ownership_at_publication(world, monkeypat
     assert not (world.tmp_path / media.with_suffix(".en.combined-hu.srt").name).exists()
 
 
+@pytest.mark.parametrize('late_claim', ['input', 'destination', 'alternate generated'])
+def test_source_combine_rechecks_mapped_aliases_under_writer(world, monkeypatch, late_claim):
+    from media_sources import indexer
+    from subtitles.tools.combine import main as combine
+    from utilities.path_mappings import path_mappings
+
+    folder = _custom_folder(world, monkeypatch, world.tmp_path)
+    context = _movie(world, 'Film.mkv')
+    primary = folder / 'Film.en.srt'
+    secondary = folder / 'Film.hu.srt'
+    destination = folder / 'Film.en.combined-hu.srt'
+    alternate = destination.with_suffix('.ssa')
+    protected = alternate.with_suffix('.ffsubsync.ssa')
+    owned = alternate.with_suffix('.alass.ssa')
+    for path in (primary, secondary, alternate, protected, owned):
+        path.write_bytes(CONTENT)
+
+    other = world.tmp_path / 'Other'
+    initial = video(other / 'Other.mkv')
+    alias = other / 'Alias.mkv'
+    alias.symlink_to(initial)
+    monkeypatch.setattr(path_mappings, 'path_mapping_movies', [['/remote', str(other)]])
+    world.db.execute(_legacy_owner_insert(world, 'radarr', '/remote/Alias.mkv'))
+    competing_subtitle = {'input': primary, 'destination': destination, 'alternate generated': protected}[late_claim]
+    replacement = video(other / 'Retargeted' / competing_subtitle.with_suffix('.mkv').name)
+    publication = indexer.source_item_publication
+    registry = indexer.SourcePublicationOwnerIndex()._registry_snapshot()
+    rechecked = []
+
+    def change_after_preparation(source, **kwargs):
+        assert kwargs['shared']
+        alias.unlink()
+        alias.symlink_to(replacement)
+        assert indexer.SourcePublicationOwnerIndex()._registry_snapshot() == registry
+        rechecked.append(True)
+        return publication(source, **kwargs)
+
+    monkeypatch.setattr(indexer, 'source_item_publication', change_after_preparation)
+    result = combine.try_combine_for_video(context.path, 'movie', languages=['en', 'hu'], format='srt', source=context)
+    assert rechecked == [True]
+    assert primary.read_bytes() == secondary.read_bytes() == protected.read_bytes() == CONTENT
+    if late_claim == 'alternate generated':
+        assert result.status == 'built' and Path(result.path) == destination
+        assert not alternate.exists() and not owned.exists()
+    else:
+        assert result.status == 'failed' and 'owner' in result.error
+        assert not destination.exists()
+        assert alternate.read_bytes() == owned.read_bytes() == CONTENT
+        assert not world.published
+
+
 @pytest.mark.parametrize('language', ['en', 'hu'])
 @pytest.mark.parametrize(('input_location', 'alias'), [
     ('media folder', False), ('shared folder', False), ('shared folder', True),
@@ -3758,7 +3809,7 @@ def test_source_combine_rechecks_local_input_ownership_after_preparation(
         assert str(primary if language == 'en' else secondary) not in consumed
     else:
         assert ('input lost its unique owner before publication' in result.error
-                or 'Another video now owns the subtitle destination' in result.error)
+                or 'Another video now owns a subtitle destination' in result.error)
     for path in (primary, secondary, destination, alternate, variant):
         assert path.read_bytes() == CONTENT
     assert world.db.execute(sa.select(repository.History)).all() == []

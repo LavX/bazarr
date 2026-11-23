@@ -6,6 +6,7 @@ import re
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from subtitles.tools.subsync_engines import (capture_subtitle_versions, local_subtitle_owner_is_clear,
                                              plan_sync_output_cleanup, quarantine_sync_outputs_after_mutation,
                                              read_regular_subtitle,
@@ -166,6 +167,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
 
             if source is not None:
                 owners = owner_kwargs['ownership_index'] = SourcePublicationOwnerIndex()
+                publication_paths = (*inputs, out_path)
 
                 def prepare():
                     if not sync_output_owner_is_unique(video_path, out_path, **owner_kwargs):
@@ -174,22 +176,30 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                         if (regular_subtitle_version(path) != version
                                 or not sync_output_owner_is_unique(video_path, path, **owner_kwargs)):
                             raise ValueError('A combined subtitle input changed or lost its unique owner')
-                    return _plan_source_alternates(out_path, video_path, owners)
+                    publication_proof = owners.prepare_registered_ownership(video_path, publication_paths)
+                    alternates = _plan_source_alternates(out_path, video_path, owners)
+                    alternate_paths = tuple(path for sibling, _, generated in alternates
+                                            for path in (sibling, *(output for output, _ in generated)))
+                    alternate_proof = (owners.prepare_registered_ownership(video_path, alternate_paths)
+                                       if alternate_paths else None)
+                    return publication_proof, alternates, alternate_proof
 
                 @contextmanager
                 def publication():
                     with owners.publication(source, prepare, destination=out_path, cleanup_outputs=True) as (
-                            current, _, alternates):
+                            current, _, prepared):
                         if current is None or current.path != video_path:
                             raise ValueError('The source item moved or was removed during composition')
                         if subtitle_source_version(video_path) != video_version:
                             raise ValueError('The source media file changed during composition')
-                        # The prepared registry owners are pinned here. Recheck
-                        # media-folder videos for inputs in either subtitle folder.
-                        if any(not sync_output_owner_is_unique(video_path, path, owners) for path in inputs):
+                        publication_proof, alternates, alternate_proof = prepared
+                        if not all(local_subtitle_owner_is_clear(video_path, path, owners) for path in inputs):
                             raise ValueError('A combined subtitle input lost its unique owner before publication')
+                        if not owners.registered_ownership_is_current(publication_proof):
+                            raise ValueError('A combined subtitle input or destination lost its unique owner')
                         yield
-                        _retire_source_alternates(video_path, alternates, owners, notify)
+                        _retire_source_alternates(video_path, alternates, owners, notify,
+                                                  partial(owners.registered_ownership_is_current, alternate_proof))
 
                 write_kwargs['publication_guard'] = publication
                 write_kwargs['invalidate_outputs'] = False
@@ -294,11 +304,12 @@ def _plan_source_alternates(out_path, video_path, owners):
     return alternates
 
 
-def _retire_source_alternates(video_path, alternates, owners, notify):
+def _retire_source_alternates(video_path, alternates, owners, notify, output_is_current):
     for sibling, version, generated in alternates:
         try:
             with subtitle_mutation(video_path, sibling, invalidate_outputs=False):
-                if not local_subtitle_owner_is_clear(video_path, sibling, owners):
+                if (not output_is_current(sibling)
+                        or not local_subtitle_owner_is_clear(video_path, sibling, owners)):
                     continue
                 if version is None:
                     if os.path.lexists(sibling):
@@ -309,7 +320,8 @@ def _retire_source_alternates(video_path, alternates, owners, notify):
                         notify(sibling)
                 else:
                     continue
-            quarantine_sync_outputs_after_mutation(video_path, sibling, owners, prepared=generated)
+            quarantine_sync_outputs_after_mutation(video_path, sibling, owners, prepared=generated,
+                                                   output_is_current=output_is_current)
         except OSError:
             logging.exception('BAZARR combine could not remove stale sibling %s', sibling)
 
