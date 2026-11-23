@@ -5201,18 +5201,90 @@ def _abandon_if_still_staged(provider_id: str, installation: dict[str, Any], mes
     mutate_state(drop)
 
 
-def _reserve_staged_data_key(provider_id: str, installation: dict[str, Any]) -> str | None:
+def _catalog_publication(manifest: Any) -> tuple | None:
+    source = manifest.get("source") if isinstance(manifest, dict) else None
+    if isinstance(source, dict) and source.get("repo"):
+        return tuple(source.get(field) for field in ("type", "repo", "path", "catalog_url"))
+
+
+def _keyless_stage_owner(
+    state: dict[str, Any], row: dict[str, Any], stage: releases.SlotIdentity | None,
+) -> tuple[str | None, str | None]:
+    """Return a catalog rebind or a refusal for a keyless stage whose owners differ."""
+    source_id = row.get("source_id")
+    origin = row.get("origin")
+    if stage is None or (stage.source_id, stage.origin) == (source_id, origin):
+        return None, None
+    if origin != stage.origin or origin != "catalog":
+        return None, "the staged release has conflicting origins"
+
+    sources = state.get("catalog_sources") or {}
+    if source_id is None:
+        # A removed catalog or official trust demotion can leave the recorded owner on the release.
+        removed = row.get("trust_note") == _SOURCE_REMOVED_NOTE and stage.source_id not in sources
+        demoted = (stage.source_id == OFFICIAL_CATALOG_SOURCE_ID and not row.get("trusted")
+                   and row.get("trust_note") and isinstance(row.get("demoted_commit"), bool))
+        if row.get("source_bound") and (removed or demoted):
+            # The old catalog is no longer available to distinguish a restage from a normal update.
+            # A different publication cannot inherit the recorded catalog's identity.
+            active_publication = _catalog_publication(row.get("manifest"))
+            if not row.get("active_version") or (
+                    active_publication and active_publication == _catalog_publication(row.get("staged_manifest"))):
+                return None, None
+    elif (row.get("source_bound") and source_id in sources and stage.source_id is not None
+          and stage.bundle_digest == row["staged_manifest"].get("bundle_sha256")
+          and _catalog_binding(row["staged_manifest"], state, source_id) == (source_id, bool(row.get("trusted")))):
+        return source_id, None
+    return None, "the staged release's catalog binding cannot be verified"
+
+
+def _verify_restaged_bundle(installation: dict[str, Any]) -> None:
+    kind = get_kind(kind_of(installation))
+    manifest = kind.validate_manifest(installation["staged_manifest"], bool(installation.get("trusted")))
+    path = validated_bundle_path(provider_hub_dir(), installation.get("staged_path"))
+    if path is None or path != _bundle_path_for(manifest).resolve():
+        raise ProviderHubInstallError("the staged bundle path does not match its manifest")
+    _verify_bundle_for_run(manifest, path)
+
+
+def _reserve_staged_data_key(
+    provider_id: str, installation: dict[str, Any], snapshot: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
     """Give a stage from before per-release data a stable key before activation can copy or run it."""
     key = uuid.uuid4().hex
+    slots = getattr(snapshot, "keyless_stage_slots", {}).get(provider_id, {})
+    stage = slots.get(releases.STAGED)
+    active = slots.get(releases.ACTIVE)
+    owner = _keyless_stage_owner(snapshot, installation, stage)
+    rebound_source, refusal = owner
+    if rebound_source is not None:
+        # The old writer reused a staged row by version/path but kept its previous catalog ID.
+        # Check the bytes at that historical path against the new catalog's exact entry.
+        try:
+            _verify_restaged_bundle(installation)
+        except (ValueError, OSError, ProviderHubInstallError) as error:
+            refusal = refusal_text(error)
 
     def reserve(state):
         row = (state.get("installations") or {}).get(provider_id)
-        if not _same_staged_release(row, installation):
-            return None
+        if (not _same_staged_release(row, installation)
+                or getattr(state, "keyless_stage_slots", {}).get(provider_id, {}) != slots
+                or any(row.get(field) != installation.get(field) for field in (
+                    "installed_at", "source_bound", "trust_note", "demoted_commit",
+                    "active_version", "active_path", "active_data_key", "manifest"))
+                or _keyless_stage_owner(state, row, stage) != owner):
+            return None, None
+        if refusal is not None:
+            _abandon_staged_release(row, refusal)
+            return None, refusal
+        if stage is not None and (rebound_source is not None or stage.source_id != row.get("source_id")):
+            stage_owner = (rebound_source or stage.source_id, stage.origin)
+            if active is None or (active.source_id, active.origin) != stage_owner:
+                row["staged_data_from_active"] = False
         row["staged_data_key"] = key
         if isinstance(state, releases.StateDocument):
-            state.adopting_staged_data_for = provider_id
-        return key
+            state.adopting_staged_data = provider_id, rebound_source
+        return dict(row), None
 
     return mutate_state(reserve)
 
@@ -5299,10 +5371,11 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
         return Activation(provider_id, ACTIVATION_WAITING, target_version, previous_version, message)
     if (datadir.declared(installation.get("staged_manifest")) and not installation.get("staged_data_key")
             and not installation.get("staged_data_rollback")):
-        key = _reserve_staged_data_key(provider_id, installation)
-        if key is None:
-            return Activation(provider_id, ACTIVATION_SKIPPED, target_version, previous_version)
-        installation["staged_data_key"] = key
+        reserved, refusal = _reserve_staged_data_key(provider_id, installation, state)
+        if reserved is None:
+            outcome = ACTIVATION_FAILED if refusal is not None else ACTIVATION_SKIPPED
+            return Activation(provider_id, outcome, target_version, previous_version, refusal)
+        installation = reserved
 
     with record_job(
         "activate",

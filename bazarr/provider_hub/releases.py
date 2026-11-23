@@ -293,11 +293,24 @@ def _digest(manifest: dict[str, Any] | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+@dataclass(frozen=True)
+class SlotIdentity:
+    id: int
+    created_at: str
+    source_id: str | None
+    origin: str | None
+    bundle_digest: str | None
+
+
 class StateDocument(dict):
     """The composed state with release metadata that is never stored in the document or state.json."""
 
     retained_releases: tuple[dict[str, Any], ...] = ()
-    adopting_staged_data_for: str | None = None
+    adopting_staged_data: tuple[str, str | None] | None = None
+
+    def __init__(self, data: dict[str, Any]):
+        super().__init__(data)
+        self.keyless_stage_slots: dict[str, dict[str, SlotIdentity]] = {}
 
 
 def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument":
@@ -329,6 +342,12 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
         slots = by_plugin.get(plugin_id)
         if not slots or not isinstance(installation, dict):
             continue
+        if STAGED in slots and _data_key(slots[STAGED]) is None:
+            document.keyless_stage_slots[plugin_id] = {
+                state: SlotIdentity(release["id"], release["created_at"], release.get("source_id"),
+                                    release.get("origin"), release.get("bundle_digest"))
+                for state, release in slots.items()
+            }
         for state, keys in ((ACTIVE, _ACTIVE_KEYS), (STAGED, _STAGED_KEYS)):
             release = slots.get(state)
             if release is None:
@@ -426,7 +445,7 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                         return release
             return None
 
-        def settle(slot: _Slot, release: dict[str, Any] | None, state: str) -> None:
+        def settle(slot: _Slot, release: dict[str, Any] | None, state: str, *, source_id: str | None = None) -> None:
             unchanged_env = release is not None and release.get("python_path") == slot.python_path
             values = {
                 "state": state, "bundle_path": slot.bundle_path, "python_path": slot.python_path,
@@ -438,6 +457,8 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
             if state == ACTIVE:
                 values["activated_at"] = slot.activated_at
                 values["retired_at"] = None
+            if source_id is not None:
+                values["source_id"] = source_id
             if release is None:
                 source, origin = row.get("source_id"), row.get("origin")
                 values.update(plugin_id=plugin_id, version=slot.version, created_at=stamp,
@@ -452,7 +473,10 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                 plan.updates.append((release["id"], changed, None if bindings is None else dict(bindings)))
 
         if staged is not None:
-            if getattr(data, "adopting_staged_data_for", None) == plugin_id:
+            adoption = getattr(data, "adopting_staged_data", None)
+            rebound_source = None
+            if adoption is not None and adoption[0] == plugin_id:
+                rebound_source = adoption[1]
                 # Adopt only into the existing staged slot. A retired release with the same code is unrelated.
                 staged_release = next((release for release in existing if release["state"] == STAGED), None)
                 # A removed catalog or a trust demotion clears the installation's binding. The release
@@ -463,12 +487,13 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                         or staged_release.get("bundle_path") != staged.bundle_path
                         or staged_release.get("python_path") != staged.python_path
                         or _loads(staged_release.get("manifest")) != staged.manifest
-                        or (source_id is not None and staged_release.get("source_id") != source_id)
+                        or (source_id is not None and staged_release.get("source_id") != source_id
+                            and rebound_source != source_id)
                         or staged_release.get("origin") != row.get("origin")):
                     raise ReleaseTransitionError("the staged release changed before its data key could be recorded")
             else:
                 staged_release = find(staged, (STAGED, RETIRED))
-            settle(staged, staged_release, STAGED)
+            settle(staged, staged_release, STAGED, source_id=rebound_source)
         if active is not None:
             settle(active, find(active, (ACTIVE, STAGED, DRAINING, RETIRED)), ACTIVE)
         # What the slots no longer name.

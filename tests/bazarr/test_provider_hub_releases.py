@@ -1627,13 +1627,15 @@ def test_pre_key_provider_stage_reserves_data_identity_before_retry(hub, monkeyp
     _seed(examplehub=_row(
         plugin_id, active="1.0.0", staged="1.1.0", manifest=old, staged_manifest=new,
         origin="local" if origin == "local" else "catalog", source_bound=origin != "local",
-        source_id=None if origin == "local" else "official", trusted=origin != "local"))
+        source_id=(None if origin == "local" else "community" if origin == "detached-catalog" else "official"),
+        trusted=origin == "catalog"))
     staged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
     if origin == "detached-catalog":
-        def detach_source(state):
-            state["installations"][plugin_id].update(source_id=None, source_bound=False)
-
-        mutate_state(detach_source)
+        mutate_state(lambda state: state["catalog_sources"].update({
+            "community": {"id": "community", "name": "Community", "enabled": True, "trusted": False}}))
+        assert service.remove_catalog_source("community")
+        detached = load_state()["installations"][plugin_id]
+        assert detached["source_id"] is None and detached["source_bound"] is True
     row = load_state()["installations"][plugin_id]
     assert staged.data_key is None
     assert "staged_data_from_active" not in row
@@ -1688,38 +1690,183 @@ def test_pre_key_provider_stage_reserves_data_identity_before_retry(hub, monkeyp
     assert active.source_id == staged.source_id
     assert checked == [(reserved_data, "last legacy write"), (reserved_data, "final legacy write")]
     assert (legacy / "settings").read_text() == "final legacy write"
+    assert service.activate_staged_installations() == []
+    assert len(checked) == 2
+    assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,))[0] == active
 
 
-def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(hub, monkeypatch):
+@pytest.mark.parametrize(("bundle_valid", "remove_sources"), [(True, False), (False, False), (True, True)],
+                         ids=["verified", "changed-bytes", "removed-catalogs"])
+def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(
+        hub, monkeypatch, bundle_valid, remove_sources):
     from plugin_platform_helpers import provider_manifest_v2
-    from provider_hub import datadir, service
+    from provider_hub import datadir, releases, service, state_store
+    from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
+    from provider_hub.state import load_state, mutate_state, provider_hub_dir
+
+    plugin_id = "examplehub"
+    old = provider_manifest_v2(plugin_id, "1.0.0", permissions=["data_dir"])
+    manifest_a = provider_manifest_v2(plugin_id, "1.1.0", permissions=["data_dir"])
+    manifest_a = get_kind(SUBTITLE_PROVIDER).validate_manifest(manifest_a, False).raw
+    manifest_b = {**manifest_a, "source": {**manifest_a["source"], "repo": "another/catalog",
+                                         "catalog_url": "https://github.com/another/catalog/blob/main/catalog.json"}}
+    _seed(examplehub=_row(plugin_id, active="1.0.0", staged="1.1.0", manifest=old,
+                          staged_manifest=manifest_a, source_id="catalog-a", catalog_list="plugins",
+                          active_data_key="a" * 32))
+    bundle = service._bundle_path_for(get_kind(SUBTITLE_PROVIDER).validate_manifest(manifest_b, False))
+    bundle.mkdir(parents=True)
+    (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
+    mutate_state(lambda state: state["installations"][plugin_id].update(staged_path=str(bundle)))
+    original, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+
+    def configure(state):
+        for source in ("catalog-a", "catalog-b"):
+            state["catalog_sources"][source] = {"id": source, "name": source, "enabled": True, "trusted": False}
+        state["catalog_entries"]["catalog-b:plugins:examplehub:1.1.0"] = {
+            "source": "catalog-b", "provider_id": plugin_id, "version": "1.1.0",
+            "catalog_list": "plugins", "manifest": manifest_b, "trusted": False}
+
+    mutate_state(configure)
+    active_data = datadir.release_path(provider_hub_dir(), plugin_id, "a" * 32)
+    active_data.mkdir(parents=True)
+    (active_data / "settings").write_text("private catalog A data")
+
+    # Reproduce the historical writer only at the final staging boundary. Normal
+    # stage_install still resolves and validates the exact configured B entry.
+    def historical_stage(validated, trusted, origin, source_id, bundle_stager, **kwargs):
+        assert validated.raw == manifest_b and source_id == "catalog-b"
+
+        def record(state):
+            row = service._staged_installation(
+                validated, state["installations"][plugin_id], bundle,
+                Path(_python(plugin_id, "1.1.0")), trusted, origin, source_id, kwargs["catalog_list"])
+            state["installations"][plugin_id] = row
+            return dict(row)
+
+        return mutate_state(record)
+
+    reserve = service._reserve_staged_data_key
+
+    def replace_before_reservation(provider_id, installation, *args):
+        with monkeypatch.context() as historical:
+            historical.setattr(service, "_stage_validated", historical_stage)
+            service.stage_install(manifest_b, source_id="catalog-b", catalog_list="plugins")
+        return reserve(provider_id, installation, *args)
+
+    kind = get_kind(SUBTITLE_PROVIDER)
+    with monkeypatch.context() as racing:
+        racing.setattr(service, "_reserve_staged_data_key", replace_before_reservation)
+        racing.setattr(datadir, "copy_folder", lambda *args: pytest.fail("copied during stale activation"))
+        racing.setattr(service, "_active_data_path", lambda *args: pytest.fail("read during stale activation"))
+        racing.setattr(kind, "smoke_test", lambda *args, **kwargs: pytest.fail("smoked the stale stage"))
+        result = service.activate_release(plugin_id, at_boot=True)
+
+    assert result.outcome == service.ACTIVATION_SKIPPED
+    row = load_state()["installations"][plugin_id]
+    assert row["state"] == "staged" and row["staged_version"] == "1.1.0"
+    assert row["source_id"] == "catalog-b" and row["catalog_list"] == "plugins"
+    assert not row.get("staged_data_key")
+    restaged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    assert restaged.id == original.id and restaged.data_key is None
+    previous, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    if remove_sources:
+        assert service.remove_catalog_source("catalog-a")
+        assert service.remove_catalog_source("catalog-b")
+        detached = load_state()
+        assert not ({"catalog-a", "catalog-b"} & detached["catalog_sources"].keys())
+        assert "catalog-b:plugins:examplehub:1.1.0" not in detached["catalog_entries"]
+        row = detached["installations"][plugin_id]
+        assert row["source_id"] is None and row["source_bound"] is True
+
+    monkeypatch.setattr(service, "validated_bundle_path", lambda root, path: Path(path))
+    monkeypatch.setattr(service, "validated_interpreter", lambda root, path: Path(path))
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    monkeypatch.setattr(kind, "on_activated", lambda *args: None)
+    if remove_sources or not bundle_valid:
+        if not bundle_valid:
+            (bundle / "provider.py").write_bytes(b"changed after historical staging\n")
+        monkeypatch.setattr(service, "_active_data_path", lambda *args: pytest.fail("read before stage validation"))
+        monkeypatch.setattr(datadir, "copy_folder", lambda *args: pytest.fail("copied an unverifiable stage's data"))
+        monkeypatch.setattr(kind, "smoke_test", lambda *args, **kwargs: pytest.fail("smoked an unverifiable stage"))
+        assert service.activate_release(plugin_id, at_boot=True).outcome == service.ACTIVATION_FAILED
+        failed, = state_store.list_releases(plugin_id, states=(releases.FAILED,))
+        assert failed.id == original.id and failed.data_key is None
+        row = load_state()["installations"][plugin_id]
+        assert not row.get("pending_restart") and not row.get("staged_data_key")
+        assert row["active_version"] == "1.0.0" and row["active_data_key"] == "a" * 32
+        assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,)) == [previous]
+        assert (active_data / "settings").read_text() == "private catalog A data"
+        assert service.activate_staged_installations() == []
+        return
+
+    copied = []
+    copy_folder = datadir.copy_folder
+
+    def copy(source, target):
+        persisted, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+        assert persisted.source_id == "catalog-b" and persisted.manifest == manifest_b
+        assert source is None
+        copied.append(target)
+        return copy_folder(source, target)
+
+    checked = []
+
+    def smoke(manifest, bundle, interpreter, *, data_dir, timeout=None):
+        assert manifest.raw == manifest_b
+        assert not (data_dir / "settings").exists()
+        checked.append(data_dir)
+
+    monkeypatch.setattr(datadir, "copy_folder", copy)
+    monkeypatch.setattr(kind, "smoke_test", smoke)
+    assert service.activate_staged_installations() == [plugin_id]
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert active.id == original.id and active.source_id == "catalog-b" and active.manifest == manifest_b
+    assert active.data_key
+    assert copied == checked == [datadir.release_path(provider_hub_dir(), plugin_id, active.data_key)]
+    assert (active_data / "settings").read_text() == "private catalog A data"
+    assert service.activate_staged_installations() == []
+    assert len(checked) == len(copied) == 1
+    assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,))[0] == active
+
+
+@pytest.mark.parametrize("catalog", ["unconfigured", "unlisted", "different-bundle"])
+def test_an_unsupported_pre_key_stage_owner_conflict_fails_before_reading_or_copying_data(hub, monkeypatch, catalog):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import datadir, releases, service, state_store
+    from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
     from provider_hub.state import load_state, mutate_state
 
     plugin_id = "examplehub"
     manifest = provider_manifest_v2(plugin_id, "1.1.0", permissions=["data_dir"])
     _seed(examplehub=_row(plugin_id, staged="1.1.0", staged_manifest=manifest, catalog_list="plugins"))
-    reserve = service._reserve_staged_data_key
+    original, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    def conflict(state):
+        state["installations"][plugin_id]["source_id"] = "catalog-b"
+        if catalog != "unconfigured":
+            state["catalog_sources"]["catalog-b"] = {
+                "id": "catalog-b", "name": "Catalog B", "enabled": True, "trusted": False}
+        if catalog == "different-bundle":
+            other = provider_manifest_v2(plugin_id, "1.1.0", permissions=["data_dir"],
+                                         file_payloads={"provider.py": b"class OtherProvider: pass\n"})
+            state["catalog_entries"]["catalog-b:plugins:examplehub:1.1.0"] = {
+                "source": "catalog-b", "provider_id": plugin_id, "version": "1.1.0",
+                "catalog_list": "plugins", "manifest": other, "trusted": False}
 
-    def replace_before_reservation(provider_id, installation):
-        def replace(state):
-            row = state["installations"][provider_id]
-            row.update(source_id="another-source", catalog_list="providers")
-
-        mutate_state(replace)
-        return reserve(provider_id, installation)
-
-    monkeypatch.setattr(service, "_reserve_staged_data_key", replace_before_reservation)
-    monkeypatch.setattr(datadir, "copy_folder", lambda *args: pytest.fail("copied the replacement stage"))
-    monkeypatch.setattr(service, "_verified_staged_release", lambda *args, **kwargs: pytest.fail(
-        "checked the replacement stage"))
+    mutate_state(conflict)
+    monkeypatch.setattr(service, "_active_data_path", lambda *args: pytest.fail("read conflicting owner data"))
+    monkeypatch.setattr(datadir, "copy_folder", lambda *args: pytest.fail("copied conflicting owner data"))
+    monkeypatch.setattr(get_kind(SUBTITLE_PROVIDER), "smoke_test", lambda *args, **kwargs: pytest.fail(
+        "smoked a stage with conflicting ownership"))
 
     result = service.activate_release(plugin_id, at_boot=True)
 
-    assert result.outcome == service.ACTIVATION_SKIPPED
+    assert result.outcome == service.ACTIVATION_FAILED
     row = load_state()["installations"][plugin_id]
-    assert row["state"] == "staged" and row["staged_version"] == "1.1.0"
-    assert row["source_id"] == "another-source" and row["catalog_list"] == "providers"
-    assert not row.get("staged_data_key")
+    assert row["state"] == "failed" and not row.get("pending_restart")
+    assert not row.get("staged_version") and not row.get("staged_data_key")
+    failed, = state_store.list_releases(plugin_id, states=(releases.FAILED,))
+    assert failed.id == original.id and failed.data_key is None
+    assert service.activate_release(plugin_id, at_boot=True).outcome == service.ACTIVATION_SKIPPED
 
 
 def test_release_data_copy_preserves_local_links_and_rejects_external_files(tmp_path):
