@@ -3978,11 +3978,16 @@ def test_pruning_preserves_the_oldest_releases_sign_in_exclusions(hub):
     assert history["config_schema"]["properties"] == {"region": {}}
 
 
-def test_a_pending_restart_rollback_keeps_its_data_in_the_archive(data_release, service_kind, tmp_path):
+@pytest.mark.parametrize("previous_stopped", [True, False], ids=["confirmed", "unconfirmed"])
+def test_backup_checks_previous_workers_before_copying_active_and_retained_data(
+        data_release, service_kind, tmp_path, monkeypatch, previous_stopped):
+    import json
     from zipfile import ZipFile
 
     from provider_hub import datadir
     from provider_hub.kinds import ATTACH_ON_RESTART
+    from provider_hub.sandbox import sweep
+    from provider_hub.state import load_state
 
     service, new, old = data_release
     service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
@@ -3991,11 +3996,44 @@ def test_a_pending_restart_rollback_keeps_its_data_in_the_archive(data_release, 
     service_kind.attach_policy = ATTACH_ON_RESTART
 
     assert service.rollback_release("exampleservice").outcome == service.ACTIVATION_WAITING
+    active_key = load_state()["installations"]["exampleservice"]["active_data_key"]
+    keys = [active_key, old.name]
+    events = []
+    copy = datadir.copy_folder
+    config_dir = tmp_path / "application-config"
+
+    def prove(directory, *, deadline):
+        assert directory == config_dir
+        assert deadline > datadir.time.monotonic()
+        events.append("previous")
+        return previous_stopped
+
+    def settle(plugin_id, timeout):
+        assert plugin_id == "exampleservice"
+        events.append("current")
+        return True
+
+    def copy_release(source, *args, **kwargs):
+        events.append(source.name)
+        return copy(source, *args, **kwargs)
+
+    monkeypatch.setattr(sweep, "previous_workers_stopped", prove)
+    monkeypatch.setattr(service_kind, "settle_data", settle)
+    monkeypatch.setattr(datadir, "copy_folder", copy_release)
     path = tmp_path / "data.zip"
     with ZipFile(path, "w") as archive:
-        datadir.write_backup(archive)
+        datadir.write_backup(archive, config_dir=config_dir)
     with ZipFile(path) as archive:
-        assert archive.read(f"plugin_data/exampleservice/{old.name}/settings") == b"from v1"
+        if previous_stopped:
+            for key in keys:
+                assert archive.read(f"plugin_data/exampleservice/{key}/settings") == b"from v1"
+            assert datadir.OMISSIONS_ARCHIVE not in archive.namelist()
+            assert events == ["previous", "current", *keys]
+        else:
+            assert set(json.loads(archive.read(datadir.OMISSIONS_ARCHIVE))) == {
+                f"exampleservice/{key}" for key in keys}
+            assert not any(name.startswith("plugin_data/") for name in archive.namelist())
+            assert events == ["previous"]
 
 
 def test_kept_legacy_data_is_available_after_a_failed_reinstall(data_release):
@@ -4045,20 +4083,22 @@ def test_live_uninstall_waits_for_actual_worker_exit_before_moving_data(data_rel
     assert (old / "settings").read_text() == "from v1"
 
 
-def test_unreadable_historical_exclusions_omit_that_release_data(data_release, tmp_path):
+def test_unreadable_historical_exclusions_omit_that_release_data(data_release, tmp_path, monkeypatch):
     import json
     from zipfile import ZipFile
 
     from provider_hub import datadir
+    from provider_hub.sandbox import sweep
     from provider_hub.state import provider_hub_dir
 
     _, _, old = data_release
     folder = provider_hub_dir() / "manifests" / "exampleservice"
     folder.mkdir(parents=True)
     (folder / "older.json").write_text("unreadable test metadata")
+    monkeypatch.setattr(sweep, "previous_workers_stopped", lambda config, **kwargs: True)
     archive_path = tmp_path / "data.zip"
     with ZipFile(archive_path, "w") as archive:
-        datadir.write_backup(archive)
+        datadir.write_backup(archive, config_dir=tmp_path)
     with ZipFile(archive_path) as archive:
         assert json.loads(archive.read(datadir.OMISSIONS_ARCHIVE)) == [f"exampleservice/{old.name}"]
         assert not any(name.startswith("plugin_data/") for name in archive.namelist())

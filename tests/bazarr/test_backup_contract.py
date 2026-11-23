@@ -1586,6 +1586,7 @@ def test_backup_and_restore_preserve_plugin_owner_execute(backup_env, monkeypatc
 
     from plugin_platform_helpers import service_manifest
     from provider_hub import datadir
+    from provider_hub.sandbox import sweep
 
     monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
     root = tmp_path / 'provider_hub'
@@ -1601,6 +1602,11 @@ def test_backup_and_restore_preserve_plugin_owner_execute(backup_env, monkeypatc
         'manifest': service_manifest(permissions=['data_dir'])}}}))
     monkeypatch.setenv('BAZARR_PROVIDER_HUB_STATE', str(state_path))
 
+    def previous_workers_stopped(config_dir, *, deadline=None):
+        assert Path(config_dir) == backup_env.config_dir
+        return True
+
+    monkeypatch.setattr(sweep, 'previous_workers_stopped', previous_workers_stopped)
     assert backup_env.module.backup_to_zip(job_id=1)
     [archive] = _archives(backup_env)
     with zipfile.ZipFile(backup_env.backup_dir / archive) as zipped:
@@ -1751,8 +1757,10 @@ def test_restore_distinguishes_an_omitted_data_folder_from_an_empty_one(
 
     from plugin_platform_helpers import service_manifest
     from provider_hub import datadir
+    from provider_hub.sandbox import sweep
 
     monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    monkeypatch.setattr(sweep, "previous_workers_stopped", lambda config, **kwargs: True)
     monkeypatch.setattr(service_kind, "settle_data", lambda plugin_id, timeout: not busy)
     root = tmp_path / "provider_hub"
     key = "a" * 32
