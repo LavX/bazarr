@@ -226,6 +226,9 @@ def test_show_ownership_never_supplies_an_absent_episode(
                      season="2", episode="1")
     assert [item["local_id"] for item in present.json["items"]] == [3]
     assert present.json["items"][0]["series_local_id"] == 30
+    linked_title = copies(authenticated_client, media_type="episode", imdb_id="tt0903747",
+                          tmdb_id=84, season="2", episode="1")
+    assert linked_title.status_code == 200 and linked_title.data == present.data
     absent = copies(authenticated_client, media_type="episode", imdb_id="tt0903747",
                     season="9", episode="4")
     assert absent.status_code == 200
