@@ -20,6 +20,7 @@ from typing import Callable
 from .history import HistoryStore
 from .jobs import (AWAITING_RETRY, QUEUED, RUNNING, JobsQueuePort, Outcome, TranslationJobs, retry_hold,
                    target_key)
+from .transaction import ledger_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +152,9 @@ def retire_source_retries(source_key, scope, to_lang, forced, hi):
 
     message = _RECORDING_CHANGED_BEFORE_RETRY
     jobs = TranslationJobs(database)
-    for job_id in jobs.retire_source_retries(source_key, scope, target_key(to_lang, forced, hi), message):
-        _finish_source_change(database, job_id, message)
+    with ledger_transaction(database):
+        for job_id in jobs.retire_source_retries(source_key, scope, target_key(to_lang, forced, hi), message):
+            _finish_source_change(database, job_id, message)
 
 
 def retire_source_retry(source_key, to_lang, forced, hi):
@@ -163,9 +165,10 @@ def retire_source_retry(source_key, to_lang, forced, hi):
         message = _RECORDING_CHANGED_BEFORE_RETRY
         target = target_key(to_lang, forced, hi)
         jobs = TranslationJobs(database)
-        row = jobs.active_for(source_key, target)
-        if row is not None and jobs.cancel_source_retry(row.id, source_key, target, message):
-            _finish_source_change(database, row.id, message)
+        with ledger_transaction(database):
+            row = jobs.active_for(source_key, target)
+            if row is not None and jobs.cancel_source_retry(row.id, source_key, target, message):
+                _finish_source_change(database, row.id, message)
     except Exception:
         logger.exception("Could not retire a source translation retry for the replaced recording")
 
@@ -183,9 +186,9 @@ def cancel_waiting_for(queue_job_id, source_key, to_lang, forced, hi, reason):
 
     try:
         jobs = TranslationJobs(database)
-        row = jobs.active_for(source_key, target_key(to_lang, forced, hi))
-        if row is None or not jobs.cancel_waiting(row.id, queue_job_id, reason):
-            return
-        _finish_source_change(database, row.id, reason)
+        with ledger_transaction(database):
+            row = jobs.active_for(source_key, target_key(to_lang, forced, hi))
+            if row is not None and jobs.cancel_waiting(row.id, queue_job_id, reason):
+                _finish_source_change(database, row.id, reason)
     except Exception:
         logger.exception("Could not retire a source translation that was no longer current")

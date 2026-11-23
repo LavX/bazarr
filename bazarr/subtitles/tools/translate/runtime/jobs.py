@@ -489,20 +489,32 @@ class TranslationJobs:
                                 _with=self.checkpoints._delete_source_stmt(job.source_path, job.target))
 
     def retire_source_retries(self, source_path, scope, target, message):
-        """Cancel detached retries whose exact source reservation belongs to a different recording."""
+        """Cancel superseded reservations that have no remaining worker to end them."""
         namespace, identity = scope
         suffix = f":{identity}"
         # Match literal paths in SQL, then ensure the intervening fields really identify a recording.
         # File names can themselves contain colons and reservation-like fragments.
         stamp = r"(?::-?[0-9]+){4}" if namespace == "source-wanted" else ""
         prefix = re.compile(re.escape(namespace) + stamp + r"(?::video:-?[0-9]+(?:,-?[0-9]+){4})?")
-        rows = self._session.execute(select(TableTranslatorJob.id, TableTranslatorJob.source_path).where(
-            TableTranslatorJob.target == target, TableTranslatorJob.state == AWAITING_RETRY,
-            TableTranslatorJob.queue_job_id.is_(None), TableTranslatorJob.source_path != source_path,
+        rows = self._session.execute(select(TableTranslatorJob.id, TableTranslatorJob.source_path,
+                                            TableTranslatorJob.state, TableTranslatorJob.queue_job_id).where(
+            TableTranslatorJob.target == target, TableTranslatorJob.state.in_((QUEUED, AWAITING_RETRY)),
+            TableTranslatorJob.source_path != source_path,
             TableTranslatorJob.source_path.startswith(f"{namespace}:", autoescape=True),
             TableTranslatorJob.source_path.endswith(suffix, autoescape=True))).all()
-        return [job_id for job_id, stale_path in rows if prefix.fullmatch(stale_path.removesuffix(suffix))
-                and self.cancel_source_retry(job_id, stale_path, target, message)]
+        retired = []
+        for job_id, stale_path, state, queue_job_id in rows:
+            if not prefix.fullmatch(stale_path.removesuffix(suffix)):
+                continue
+            if state == AWAITING_RETRY:
+                cancelled = self.cancel_source_retry(job_id, stale_path, target, message)
+            else:
+                cancelled = (queue_job_id is not None
+                             and self._queue.status(queue_job_id) not in ("pending", "running")
+                             and self.cancel_waiting(job_id, queue_job_id, message))
+            if cancelled:
+                retired.append(job_id)
+        return retired
 
     def cancel_source_retry(self, job_id, source_path, target, message):
         """End a detached source retry without changing a job that was requeued."""
