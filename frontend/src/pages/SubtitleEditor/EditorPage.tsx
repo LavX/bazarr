@@ -110,6 +110,38 @@ function parseSubtitleContent(data: { format: string; content: string }) {
   }
 }
 
+function isUsableReload(
+  data: { format: string; content: string },
+  parsed: ParseResult,
+) {
+  const content = data.content.trim();
+  if (parsed.cues.length || !content) return true;
+
+  // A parser can return no cues for unreadable content. Some formats also
+  // have a valid header or document wrapper even when they have no cues.
+  switch (data.format) {
+    case "ass":
+    case "ssa":
+      return (
+        /^\[(?:Script Info|V4\+? Styles|Events)\][ \t]*\r?$/im.test(content) &&
+        !/^\s*Dialogue\s*:/im.test(content)
+      );
+    case "vtt": {
+      const [header, ...blocks] = content.split(/\r?\n(?:[ \t]*\r?\n)+/);
+      return (
+        /^WEBVTT(?:[ \t][^\r\n]*)?(?:\r?\n|$)/.test(header) &&
+        blocks.every((block) =>
+          /^(?:NOTE|STYLE|REGION)(?:\s|$)/.test(block.trim()),
+        )
+      );
+    }
+    case "smi":
+      return /^<SAMI\b[^>]*>[\s\S]*<\/SAMI>$/i.test(content);
+    default:
+      return false;
+  }
+}
+
 export function findActiveCueIndex(cues: Cue[], playbackTimeMs: number) {
   return cues.findIndex(
     (cue) => playbackTimeMs >= cue.startMs && playbackTimeMs <= cue.endMs,
@@ -226,6 +258,8 @@ export default function EditorPage() {
   const [saveConflictKey, setSaveConflictKey] = useState<string | null>(null);
   const [isReloading, setIsReloading] = useState(false);
   const reloadPendingRef = useRef(false);
+  // A failed reload keeps the current draft, including results from actions
+  // already started. Only adopting a new document invalidates those results.
   const reloadVersionRef = useRef(0);
 
   const loadFetchedDocument = useCallback(
@@ -879,13 +913,20 @@ export default function EditorPage() {
 
   const handleReloadConflictedSubtitle = async () => {
     if (!hasSaveConflict || reloadPendingRef.current) return;
+    detailPaneRef.current?.flushFocusedTiming();
     reloadPendingRef.current = true;
     setIsReloading(true);
     try {
       const { data: latest } = await refetchSubtitle({ throwOnError: true });
       if (currentSyncDocumentRef.current?.subtitleKey !== subtitleKey) return;
       const parsed = latest && parseSubtitleContent(latest.data);
-      if (!latest || !parsed || !latest.etag || latest.data.exists === false) {
+      if (
+        !latest ||
+        !parsed ||
+        !latest.etag ||
+        latest.data.exists === false ||
+        !isUsableReload(latest.data, parsed)
+      ) {
         throw new Error("Incomplete subtitle document");
       }
 
@@ -1125,11 +1166,7 @@ export default function EditorPage() {
       const reloadVersion = reloadVersionRef.current;
       const reader = new FileReader();
       reader.onload = () => {
-        if (
-          reloadPendingRef.current ||
-          reloadVersion !== reloadVersionRef.current
-        )
-          return;
+        if (reloadVersion !== reloadVersionRef.current) return;
         const text = reader.result as string;
         const detectedFormat = detectFormat(file.name);
         try {
@@ -1673,7 +1710,7 @@ export default function EditorPage() {
         mediaType: mediaType || "",
       });
       if (reloadVersion !== reloadVersionRef.current) return;
-      if (!reloadPendingRef.current && queued.jobId) {
+      if (queued.jobId) {
         if (insertion) {
           dispatch({
             type: "APPLY_OP",
@@ -1718,9 +1755,8 @@ export default function EditorPage() {
   const applyTranslatedLine = useCallback(
     (targetIdx: number, line: string) => {
       if (
-        reloadPendingRef.current ||
-        (sourceRevision !== undefined &&
-          sourceRevision !== reloadVersionRef.current)
+        sourceRevision !== undefined &&
+        sourceRevision !== reloadVersionRef.current
       )
         return;
       dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, line) });

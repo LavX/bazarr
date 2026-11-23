@@ -12,6 +12,7 @@ import type { Cue } from "./types";
 
 export interface DetailPaneHandle {
   focus(): void;
+  flushFocusedTiming(): void;
   /** Return the current textarea draft if it differs from the cue text. */
   getUncommittedText(): string | null;
 }
@@ -102,6 +103,8 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(
       cue ? formatTimestamp(cue.endMs) : "",
     );
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const startInputRef = useRef<HTMLInputElement>(null);
+    const endInputRef = useRef<HTMLInputElement>(null);
     // The editor's own gate answer, not the configured engine's: the two can
     // differ in both directions, and this button posts to the editor endpoint.
     const translation = useEditorTranslationAvailability();
@@ -112,6 +115,11 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(
       () => ({
         focus() {
           textareaRef.current?.focus();
+        },
+        flushFocusedTiming() {
+          const focused = document.activeElement;
+          if (focused === startInputRef.current) startInputRef.current?.blur();
+          if (focused === endInputRef.current) endInputRef.current?.blur();
         },
         getUncommittedText() {
           if (cue && textDraft !== cue.text) {
@@ -532,6 +540,7 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(
         >
           <input
             type="text"
+            ref={startInputRef}
             value={startDraft}
             onChange={(e) => setStartDraft(e.target.value)}
             onBlur={handleStartBlur}
@@ -549,6 +558,7 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(
           </span>
           <input
             type="text"
+            ref={endInputRef}
             value={endDraft}
             onChange={(e) => setEndDraft(e.target.value)}
             onBlur={handleEndBlur}
