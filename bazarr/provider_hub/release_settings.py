@@ -122,17 +122,21 @@ def _provider_credentials_present(plugin_id, names, section, hub_config) -> bool
 
 
 def _provider_destinations(manifest, section, hub, fields) -> dict:
-    from app.config import _plugin_destination_fields, _plugin_destination_reach
+    from .kinds.subtitle_provider import overlay_provider_settings
 
-    _, _, defaults = _plugin_destination_fields(manifest)
-    declared = _declared(manifest)
-    try:
-        # Only a field declared by this release contributes to its effective settings section.
-        return {key: sorted(str(value) for value in _plugin_destination_reach(
-            section.get(key), key in hub, hub.get(key), defaults.get(key, ()))) if key in declared else []
-                for key in fields}
-    except TypeError:
-        raise ValueError("The previous provider address could not be verified") from None
+    schema = manifest.get("config_schema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    config = overlay_provider_settings(properties if isinstance(properties, dict) else {}, section, hub)
+    destinations = {}
+    for key in fields:
+        value = config.get(key)
+        if value in (None, "", [], {}):
+            destinations[key] = []
+        elif isinstance(value, (str, int, float)):
+            destinations[key] = [str(value)]
+        else:
+            raise ValueError("The previous provider address could not be verified")
+    return destinations
 
 
 def _destination_fields(before_manifest, after_manifest):

@@ -165,6 +165,20 @@ def settings_section_plugin_ids() -> set[str]:
         return set()
 
 
+def overlay_provider_settings(properties, section, stored):
+    """The worker starts with Hub values, then applies declared defaults and section values."""
+    config = dict(stored)
+    for key, field in properties.items():
+        if not isinstance(field, dict):
+            continue
+        if "default" in field and key not in config:
+            config[key] = field["default"]
+        value = section.get(key) if hasattr(section, "get") else getattr(section, key, None)
+        if value not in (None, "", [], {}):
+            config[key] = value
+    return config
+
+
 def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings, reported: set[str],
                            blocked: set[str]) -> None:
     """Overlay each running provider plugin's config with its settings section.
@@ -219,15 +233,7 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
                 section = {}
             else:
                 section = settings.get(installation.provider_id, {}) if hasattr(settings, "get") else {}
-            config = dict(provider_configs.get(installation.provider_id, {}))
-            for key, field in properties.items():
-                if not isinstance(field, dict):
-                    continue
-                if "default" in field and key not in config:
-                    config[key] = field["default"]
-                value = section.get(key) if hasattr(section, "get") else getattr(section, key, None)
-                if value not in (None, "", [], {}):
-                    config[key] = value
+            config = overlay_provider_settings(properties, section, provider_configs.get(installation.provider_id, {}))
             # Reserve any still-empty service field here. The worker gets the leased address per call.
             deliver(config, properties, installation, settings)
             provider_configs[installation.provider_id] = config

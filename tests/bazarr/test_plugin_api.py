@@ -1822,6 +1822,36 @@ def test_legacy_provider_rollback_checks_renamed_destination_fields(client, roll
     assert config.settings[plugin_id].get("base_url") == "https://current.example.test"
 
 
+@pytest.mark.parametrize("hub_retains_address", [False, True])
+def test_legacy_provider_rollback_keeps_an_unchanged_effective_address(
+        client, rollback_store, monkeypatch, hub_retains_address):
+    from app import config
+    from provider_hub import service, state
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    plugin_id = "providerhub"
+    address = "https://same.example.test"
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *args, **kwargs: None)
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setitem(config.settings, plugin_id, {})
+    before = provider_manifest_v1(plugin_id, "1.0.0")
+    after = provider_manifest_v1(plugin_id, "2.0.0", config_schema={"type": "object", "properties": {
+        "api_key": {"type": "string"}, "base_url": {"type": "string", "format": "uri"}}})
+    rollback_store(plugin_id, previous=before, current=after)
+    if hub_retains_address:
+        service.update_provider(plugin_id, config={"base_url": address})
+    config.save_settings([("settings-providerhub-api_key", "fixture value")])
+    route = f"/api/plugins/installations/{plugin_id}/rollback"
+    preview = _get(client, route).json
+    assert preview["restores_settings"] is False
+    assert preview["blocked_reason"] is None and preview["consent"] is None
+    assert _rollback(client, plugin_id).json == {"status": "waiting", "version": "1.0.0"}
+    assert service.activate_staged_installations() == [plugin_id]
+    row = state.load_state()["installations"][plugin_id]
+    assert row["config"].get("base_url") == (address if hub_retains_address else None)
+    assert bool(config.settings[plugin_id].get("api_key"))
+
+
 @pytest.mark.parametrize("edit_while_queued", [False, True])
 def test_provider_rollback_rechecks_the_effective_address_before_or_after_activation(
         client, rollback_store, monkeypatch, edit_while_queued):
