@@ -338,11 +338,11 @@ def test_unfiltered_clear_after_last_retained_source_exclusion_keeps_native_owne
     monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
     monkeypatch.setattr(settings.general, 'use_sportarr', master)
     arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 3).values(
-        enabled=primary_enabled, is_default=primary_enabled))
+        enabled=int(primary_enabled), is_default=int(primary_enabled)))
     for owner, enabled in ((4, secondary_enabled), (5, False)):
         arr_library.execute(sa.insert(TableArrInstances).values(
             id=owner, kind='sportarr', name=f'Sportarr {owner}', stable_key=f'sportarr-{owner}',
-            enabled=enabled, is_default=0, port=9000 + owner, path_mappings='[]'))
+            enabled=int(enabled), is_default=0, port=9000 + owner, path_mappings='[]'))
         arr_library.execute(sa.insert(TableSportsLeagues).values(
             id=owner, arr_instance_id=owner, sportarrLeagueId=31, title=f'League {owner}', monitored='True'))
         arr_library.execute(sa.insert(TableSportsEvents).values(
