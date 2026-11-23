@@ -46,8 +46,8 @@ def _listing(text):
 
 def item_to_dict(item):
     """One item as the API shows it. Paths are the Bazarr-visible ones, as stored."""
-    subtitles = [entry[:3] if isinstance(entry, (list, tuple)) and len(entry) == 4 and entry[1] else entry
-                 for entry in _listing(item.subtitles)]
+    subtitles = [entry[:3] if isinstance(entry, (list, tuple)) and len(entry) == 4 and entry[1]
+                 and isinstance(entry[3], (list, tuple)) else entry for entry in _listing(item.subtitles)]
     return {
         'id': item.id, 'source_id': item.source_id, 'library_id': item.library_id, 'group_id': item.group_id,
         'kind': item.kind, 'path': item.path, 'title': item.title, 'parsed_title': item.parsed_title,
