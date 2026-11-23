@@ -107,7 +107,7 @@ describe.each(["/", "/bazarr/"])("History original links under %s", (base) => {
       ).toBe(current);
       expect(document.activeElement).toHaveAttribute("id", "history-source-7");
       expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
-      expect(scrollIntoView.mock.instances).toEqual([document.activeElement]);
+      expect(scrollIntoView.mock.contexts).toEqual([document.activeElement]);
       expect(link).toHaveAttribute(
         "href",
         `${base}history/${kind}${query}#history-source-7`,
@@ -117,7 +117,7 @@ describe.each(["/", "/bazarr/"])("History original links under %s", (base) => {
       link.focus();
       await user.keyboard("{Enter}");
       expect(document.activeElement).toHaveAttribute("id", "history-source-7");
-      expect(scrollIntoView.mock.instances).toEqual([document.activeElement]);
+      expect(scrollIntoView.mock.contexts).toEqual([document.activeElement]);
       expect(
         window.location.pathname +
           window.location.search +
