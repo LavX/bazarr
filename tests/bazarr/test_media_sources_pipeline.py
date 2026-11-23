@@ -2523,6 +2523,83 @@ def isolated_jobs(monkeypatch):
     return jobs
 
 
+@pytest.mark.parametrize("change", ["unchanged", "replaced", "unsigned-auto-job", "unsigned-manual-job", "guarded-direct"])
+def test_automatic_source_translation_checks_queued_video_version(world, monkeypatch, isolated_jobs, change):
+    import json
+
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository
+    from media_sources.indexer import index_item
+    from media_sources.translation import queue_missing_translations
+    from subtitles.tools.subsync_engines import capture_subtitle_versions, subtitle_source_version
+    from subtitles.tools.translate import main
+    from subtitles.tools.translate.services.lingarr_translator import LingarrTranslatorService
+
+    profile = [{"id": 1, "language": "en", "forced": "False", "hi": "False"},
+               {"id": 2, "language": "hu", "forced": "False", "hi": "False", "translate_from": "en"}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    monkeypatch.setattr(settings.translator, "runtime_v2", False)
+    monkeypatch.setattr(settings.translator, "translator_type", "lingarr")
+    monkeypatch.setattr(settings.translator, "lingarr_url", "http://lingarr.example.test")
+    monkeypatch.setattr(settings.translator, "min_source_wait_minutes", 0)
+    monkeypatch.setattr(settings.translator, "min_source_score", 0)
+    monkeypatch.setattr(settings.translator, "translator_info", False)
+    translate = Mock(return_value=[{"position": 0, "line": "Translated"}])
+    monkeypatch.setattr(LingarrTranslatorService, "_translate_content", translate)
+
+    context = _movie(world)
+    media = Path(context.path)
+    original = media.with_suffix(".en.srt")
+    destination = media.with_suffix(".hu.srt")
+    original.write_bytes(CONTENT)
+    index_item(context.item_id)
+    version = subtitle_source_version(media)
+    if change == "guarded-direct":
+        versions = capture_subtitle_versions(context.path, (str(destination), str(original)))
+        assert isolated_jobs.list_jobs_from_queue(job_id=42) == []
+        main.translate_subtitles_file(context.path, str(original), "en", "hu", False, False, "movies",
+                                      None, None, None, None, job_id=42, source=context,
+                                      expected_destination_versions=versions)
+        translate.assert_called_once_with(["Downloaded"], job_id=42)
+        assert "Translated" in destination.read_text()
+        assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [6]
+        assert [event.operation for event in world.published] == ["translate"]
+        return
+
+    assert queue_missing_translations(context) == {"hu"}
+    (job,) = isolated_jobs.jobs_pending_queue
+    assert (job.module, job.func) == ("subtitles.tools.translate.main", "translate_subtitles_file")
+    queued_version = job.kwargs.get("source_video_version")
+
+    if change == "replaced":
+        replacement = media.with_suffix(".incoming")
+        replacement.write_bytes(b"another media file")
+        replacement.replace(media)
+        assert subtitle_source_version(media) != version
+    elif change.startswith("unsigned-"):
+        job.kwargs.pop("source_video_version", None)
+        if change == "unsigned-manual-job":
+            job.kwargs["expected_destination_versions"] = ()
+
+    assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
+    assert original.read_bytes() == CONTENT
+    actions = world.db.execute(sa.select(repository.History.c.action)).scalars().all()
+    if change == "unchanged":
+        translate.assert_called_once_with(["Downloaded"], job_id=job.job_id)
+        assert "Translated" in destination.read_text()
+        assert actions == [6]
+        assert [event.operation for event in world.published] == ["translate"]
+    else:
+        translate.assert_not_called()
+        assert job.job_name.startswith("Skipped")
+        assert not destination.exists()
+        assert actions == []
+        assert not world.published
+    assert queued_version == version
+
+
 @pytest.mark.parametrize("custom", [False, True], ids=["beside-video", "custom-folder"])
 def test_episode_download_dispatches_runtime_and_indexes_translation_and_combined_subtitle(
         world, monkeypatch, isolated_jobs, custom):
