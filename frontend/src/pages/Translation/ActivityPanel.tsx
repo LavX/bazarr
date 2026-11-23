@@ -68,6 +68,7 @@ const JobRow: FunctionComponent<{
   const main = used[used.length - 1] ?? job.connections[0];
   const when = job.finished_at ?? job.started_at;
   const pair = `${language(job.source_language)} to ${language(job.target_language)}`;
+  const totalTokens = job.input_tokens + job.output_tokens;
 
   return (
     <li className={styles.job}>
@@ -102,7 +103,7 @@ const JobRow: FunctionComponent<{
           )}
         </span>
         <span className={`${styles.jobNumber} ${styles.wide}`}>
-          {tokens(job.input_tokens + job.output_tokens)}
+          {tokens(totalTokens)}
         </span>
         <span className={`${styles.jobNumber} ${styles.wide}`}>
           {money(job.cost)}
@@ -129,8 +130,7 @@ const JobRow: FunctionComponent<{
             <dd>{formatAbsoluteTime(job.started_at) || "Not recorded"}</dd>
             <dt>Cost</dt>
             <dd>
-              {money(job.cost)} for {job.input_tokens.toLocaleString("en-US")}{" "}
-              tokens in and {job.output_tokens.toLocaleString("en-US")} out
+              {money(job.cost)} for {totalTokens.toLocaleString("en-US")} tokens
             </dd>
             {job.connections.map((item, index) => (
               <div key={index} style={{ display: "contents" }}>

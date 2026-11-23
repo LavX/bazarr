@@ -180,6 +180,7 @@ def usage(call) -> dict:
     # The whole reading is one call's: the first hold takes it and any further hold of the same call settles at 0.
     # All of them are settled as one step, so a total taken half way (the reading against one hold while the
     # other still counts at its worst case) never decides whether the job is over its budget.
+    # The SDK reports aggregate tokens and the charge separately. The input column holds that total for compatibility.
     try:
         settlement = ledger.settle_calls(
             context.ledger_id,

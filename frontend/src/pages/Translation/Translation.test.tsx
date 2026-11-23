@@ -2078,6 +2078,8 @@ describe("Translation page, defaults and activity", () => {
             status: "failed",
             error_class: "content_error",
             error_detail: "The model returned 211 lines for 214.",
+            input_tokens: 5495,
+            output_tokens: 0,
           }),
         ].filter((item) => !status || item.status === status);
         return HttpResponse.json({ data: rows, total: rows.length });
@@ -2100,6 +2102,7 @@ describe("Translation page, defaults and activity", () => {
     expect(flow).toHaveAttribute("aria-expanded", "false");
     expect(flow).not.toHaveAttribute("aria-controls");
     await user.click(flow);
+    expect(within(history).getByText(/for 5,495 tokens$/)).toBeVisible();
     expect(
       await screen.findByText(
         "The model returned 211 lines for 214. (content_error)",
