@@ -114,7 +114,11 @@ class EmbyClient:
     def get_item_pages(self, parent_id, item_types, *, cancel=None):
         from media_servers.item_pages import collect_items
 
-        return collect_items(self._fetch_collection_items, parent_id, item_types, cancel)
+        def fetch(params):
+            # Emby omits PremiereDate from collection rows unless it is requested.
+            return self._fetch_collection_items({**params, 'Fields': params['Fields'] + ',PremiereDate'})
+
+        return collect_items(fetch, parent_id, item_types, cancel)
 
     def lookup_item_ids(self, ids):
         from media_servers.item_pages import find_ids
