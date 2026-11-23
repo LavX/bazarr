@@ -5,6 +5,7 @@ BAZARR_PG_TEST_URL is set.
 """
 import os
 import sys
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -520,7 +521,6 @@ def test_history_database_failure_keeps_a_dispatch_retry_recoverable(
     job = queue._reserve_next_job()
     assert job.job_id == first
     queried = []
-    engine = env.session.get_bind()
 
     def unavailable(*args, **kwargs):
         row = env.last_job()
@@ -531,39 +531,12 @@ def test_history_database_failure_keeps_a_dispatch_retry_recoverable(
         queried.append(job_id)
         self._session.execute(sa.text("SELECT missing_test_column FROM translation_history"))
 
-    if operation == "update":
-        with engine.begin() as connection:
-            if connection.dialect.name == "sqlite":
-                connection.exec_driver_sql("""
-                    CREATE TRIGGER reject_history_retry BEFORE UPDATE ON translation_history
-                    FOR EACH ROW WHEN NEW.status = 'awaiting_retry'
-                    BEGIN SELECT RAISE(ABORT, 'fixture history write failed'); END
-                """)
-            else:
-                connection.exec_driver_sql("""
-                    CREATE FUNCTION reject_history_retry() RETURNS trigger AS $failure$
-                    BEGIN RAISE EXCEPTION 'fixture history write failed'; END;
-                    $failure$ LANGUAGE plpgsql
-                """)
-                connection.exec_driver_sql("""
-                    CREATE TRIGGER reject_history_retry BEFORE UPDATE ON translation_history
-                    FOR EACH ROW WHEN (NEW.status = 'awaiting_retry') EXECUTE FUNCTION reject_history_retry()
-                """)
-
-    with monkeypatch.context() as failure:
+    fault = helpers.reject_history_update(env.session, "awaiting_retry") if operation == "update" else nullcontext()
+    with monkeypatch.context() as failure, fault:
         failure.setattr(Dispatcher, "_candidates", unavailable)
         if operation == "lookup":
             failure.setattr(HistoryStore, "get_by_job", fail_lookup)
-        try:
-            assert not queue._run_job(job)
-        finally:
-            if operation == "update":
-                with engine.begin() as connection:
-                    if connection.dialect.name == "sqlite":
-                        connection.exec_driver_sql("DROP TRIGGER reject_history_retry")
-                    else:
-                        connection.exec_driver_sql("DROP TRIGGER reject_history_retry ON translation_history")
-                        connection.exec_driver_sql("DROP FUNCTION reject_history_retry()")
+        assert not queue._run_job(job)
 
     assert job.status == "failed" and job.error["reason"] == "unexpected_error"
     assert "Exception raised while running function: could not read the selected backend" in caplog.text
