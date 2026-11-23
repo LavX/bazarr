@@ -1,4 +1,4 @@
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryFilters } from "@tanstack/react-query";
 import { debounce, DebouncedFunc } from "lodash";
 import { QueryKeys } from "./keys";
 
@@ -25,13 +25,20 @@ export function scheduleSubtitleScoresRefresh(
   if (refresh === undefined) {
     refresh = debounce(
       async () => {
-        const filters = {
-          queryKey: [media, QueryKeys.Range, { scores: true }],
-        };
-        // Invalidating alone reuses an initial request that may have read the
-        // history before this write. Cancel it before requesting a fresh view.
-        await client.cancelQueries(filters);
-        await client.invalidateQueries(filters);
+        const filters: QueryFilters[] = [
+          { queryKey: [media, QueryKeys.Range, { scores: true }] },
+          {
+            queryKey: [media, "library"],
+            predicate: ({ queryKey }) => isScoredRangeQuery(queryKey),
+          },
+        ];
+        // Invalidating alone reuses an initial read from before this write.
+        await Promise.all(
+          filters.map((filter) => client.cancelQueries(filter)),
+        );
+        await Promise.all(
+          filters.map((filter) => client.invalidateQueries(filter)),
+        );
       },
       1_000,
       { maxWait: 5_000 },
@@ -43,8 +50,9 @@ export function scheduleSubtitleScoresRefresh(
 
 /** Whether a query key is a scored range read (the whole-list aggregation). */
 export function isScoredRangeQuery(queryKey: readonly unknown[]): boolean {
-  if (queryKey.length < 3 || queryKey[1] !== QueryKeys.Range) return false;
-  const params = queryKey[2];
+  const range = queryKey[1] === "library" ? 3 : 1;
+  if (queryKey[range] !== QueryKeys.Range) return false;
+  const params = queryKey[range + 1];
   return (
     typeof params === "object" &&
     params !== null &&

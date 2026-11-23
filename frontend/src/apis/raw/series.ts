@@ -1,4 +1,5 @@
 import BaseApi from "./base";
+import { libraryParams, LibraryRow, LibraryScope } from "./library";
 
 class SeriesApi extends BaseApi {
   constructor() {
@@ -22,6 +23,13 @@ class SeriesApi extends BaseApi {
       ...(includeScores ? { scores: 1 } : {}),
     });
     return response;
+  }
+
+  library(range: Parameter.Range, includeScores: boolean, scope: LibraryScope) {
+    return this.get<DataWrapperWithTotal<LibraryRow<Item.Series>>>(
+      "",
+      libraryParams(range, includeScores, scope),
+    );
   }
 
   async modify(form: FormType.ModifyItem) {

@@ -229,11 +229,18 @@ export function useSettingsMutation(
   });
 }
 
+function arrSearchResults(results: ItemSearchResult[]): ItemSearchResult[] {
+  return results.filter((item) => item.origin !== "source");
+}
+
 export function useServerSearch(query: string, enabled: boolean) {
+  const { data: settings } = useSystemSettings();
   return useQuery({
     queryKey: [QueryKeys.System, QueryKeys.Search, query],
     queryFn: () => api.system.search(query),
     enabled,
+    select:
+      settings?.media_sources?.visible === false ? arrSearchResults : undefined,
   });
 }
 

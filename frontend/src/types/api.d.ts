@@ -599,7 +599,18 @@ type ItemSearchResult = Partial<SeriesIdType> &
     /** Present on a sports league. A league has a sport, not a year. */
     sportarrLeagueId?: number;
     sport?: string | null;
-  };
+  } & (
+    | { origin?: "arr"; source_kind?: never }
+    | {
+        origin: "source";
+        source_kind: "show" | "movie";
+        id: number;
+        arr_instance_id?: never;
+        sonarrSeriesId?: never;
+        radarrId?: never;
+        sportarrLeagueId?: never;
+      }
+  );
 
 type BackendError = {
   code: number;

@@ -3,6 +3,7 @@ import {
   ActionIcon,
   Badge,
   Box,
+  Checkbox,
   Collapse,
   Divider,
   Group,
@@ -92,6 +93,13 @@ interface Props<T extends Item.Base = Item.Base> {
   instanceOptions?: { value: string; label: string }[];
   instanceValues?: string[];
   onInstanceValuesChange?: (values: string[]) => void;
+  instanceLabel?: "Instance" | "Source";
+  showSingleInstance?: boolean;
+  getInstanceValue?: (item: T) => string | undefined;
+  needsAttention?: boolean;
+  onNeedsAttentionChange?: (value: boolean) => void;
+  clearSourceFilters?: () => void;
+  getRowId?: (item: T) => string;
   tagValues?: string[];
   onTagValuesChange?: (values: string[]) => void;
   enableRowSelection?: boolean;
@@ -123,6 +131,13 @@ function ItemView<T extends Item.Base>({
   instanceOptions,
   instanceValues = [],
   onInstanceValuesChange,
+  instanceLabel = "Instance",
+  showSingleInstance = false,
+  getInstanceValue,
+  needsAttention = false,
+  onNeedsAttentionChange,
+  clearSourceFilters,
+  getRowId,
   tagValues = [],
   onTagValuesChange,
   enableRowSelection,
@@ -134,7 +149,9 @@ function ItemView<T extends Item.Base>({
   const showInstanceFilter =
     onInstanceValuesChange !== undefined &&
     instanceOptions !== undefined &&
-    instanceOptions.length > 1;
+    (instanceOptions.length > 1 ||
+      instanceValues.length > 0 ||
+      (showSingleInstance && instanceOptions.length > 0));
   const showSubtitlesFilter =
     onSubtitlesFilterChange !== undefined && subtitlesStatus !== undefined;
   const showScoreFilter =
@@ -219,8 +236,13 @@ function ItemView<T extends Item.Base>({
         }
       }
       if (instanceValues.length > 0) {
-        const owner = (item as { arr_instance_id?: number }).arr_instance_id;
-        if (owner == null || !instanceValues.includes(String(owner))) {
+        const arrId = (item as { arr_instance_id?: number }).arr_instance_id;
+        const owner = getInstanceValue
+          ? getInstanceValue(item)
+          : arrId == null
+            ? undefined
+            : String(arrId);
+        if (owner === undefined || !instanceValues.includes(owner)) {
           return false;
         }
       }
@@ -266,6 +288,7 @@ function ItemView<T extends Item.Base>({
       audioLanguages,
       excludeLanguages,
       instanceValues,
+      getInstanceValue,
       tagValues,
       subtitlesFilter,
       subtitlesStatus,
@@ -292,6 +315,7 @@ function ItemView<T extends Item.Base>({
     if (excludeLanguages.length > 0) count++;
     if (searchValue.length > 0) count++;
     if (instanceValues.length > 0) count++;
+    if (needsAttention) count++;
     if (tagValues.length > 0) count++;
     if (subtitlesFilter !== "any") count++;
     if (scoreFilter !== "any") count++;
@@ -301,6 +325,7 @@ function ItemView<T extends Item.Base>({
     excludeLanguages,
     searchValue,
     instanceValues,
+    needsAttention,
     tagValues,
     subtitlesFilter,
     scoreFilter,
@@ -353,9 +378,18 @@ function ItemView<T extends Item.Base>({
         .join(", ");
       chips.push({
         key: "instance",
-        label: `Instance: ${names}`,
+        label: `${instanceLabel}: ${names}`,
         color: "grape",
         onRemove: () => onInstanceValuesChange([]),
+      });
+    }
+
+    if (needsAttention && onNeedsAttentionChange) {
+      chips.push({
+        key: "needs-attention",
+        label: "Needs attention",
+        color: "yellow",
+        onRemove: () => onNeedsAttentionChange(false),
       });
     }
 
@@ -403,6 +437,9 @@ function ItemView<T extends Item.Base>({
     scoreFilter,
     scoreFilterOptions,
     instanceOptions,
+    instanceLabel,
+    needsAttention,
+    onNeedsAttentionChange,
     langOptions,
     onSearchChange,
     onAudioLanguagesChange,
@@ -417,7 +454,8 @@ function ItemView<T extends Item.Base>({
     onSearchChange?.("");
     onAudioLanguagesChange?.([]);
     onExcludeLanguagesChange?.([]);
-    onInstanceValuesChange?.([]);
+    if (clearSourceFilters) clearSourceFilters();
+    else onInstanceValuesChange?.([]);
     onTagValuesChange?.([]);
     onSubtitlesFilterChange?.("any");
     onScoreFilterChange?.("any");
@@ -426,6 +464,7 @@ function ItemView<T extends Item.Base>({
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    clearSourceFilters,
     onTagValuesChange,
     onSubtitlesFilterChange,
     onScoreFilterChange,
@@ -435,6 +474,7 @@ function ItemView<T extends Item.Base>({
     onAudioLanguagesChange !== undefined ||
     onExcludeLanguagesChange !== undefined ||
     showInstanceFilter ||
+    onNeedsAttentionChange !== undefined ||
     onTagValuesChange !== undefined ||
     showSubtitlesFilter ||
     showScoreFilter;
@@ -704,14 +744,15 @@ function ItemView<T extends Item.Base>({
                 <Group gap={6} mb={4}>
                   <FontAwesomeIcon icon={faServer} size="xs" opacity={0.6} />
                   <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
-                    Instance
+                    {instanceLabel}
                   </Text>
                 </Group>
                 <MultiSelect
+                  aria-label={instanceLabel}
                   placeholder={
                     instanceValues.length > 0
                       ? undefined
-                      : "Filter by instance..."
+                      : `Filter by ${instanceLabel.toLowerCase()}...`
                   }
                   data={instanceOptions}
                   value={instanceValues}
@@ -726,6 +767,16 @@ function ItemView<T extends Item.Base>({
                   }}
                 />
               </Box>
+            )}
+            {onNeedsAttentionChange && (
+              <Checkbox
+                label="Needs attention"
+                checked={needsAttention}
+                onChange={(event) =>
+                  onNeedsAttentionChange(event.currentTarget.checked)
+                }
+                mb={8}
+              />
             )}
             {onTagValuesChange !== undefined && (
               <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
@@ -828,6 +879,7 @@ function ItemView<T extends Item.Base>({
         dataFilter={hasActiveFilter ? dataFilter : undefined}
         tableStyles={{ emptyText: "No items found" }}
         enableRowSelection={enableRowSelection}
+        getRowId={getRowId}
         onRowSelectionChanged={(rows: Row<T>[]) => {
           onSelectionChanged?.(rows.map((r) => r.original));
         }}

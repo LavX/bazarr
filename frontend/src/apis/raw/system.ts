@@ -249,7 +249,10 @@ class SystemApi extends BaseApi {
   }
 
   async search(query: string) {
-    const response = await this.get<ItemSearchResult[]>("/searches", { query });
+    const response = await this.get<ItemSearchResult[]>("/searches", {
+      query,
+      sources: 1,
+    });
     return response;
   }
 }

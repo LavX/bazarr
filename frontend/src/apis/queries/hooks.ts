@@ -53,6 +53,7 @@ export function usePaginationQuery<
   // individual cache the detail pages read.
   includeScores = false,
   isolateScopes = false,
+  individualKey?: (item: TObject) => QueryKey,
 ): UsePaginationQueryResult<TObject> {
   const client = useQueryClient();
 
@@ -132,9 +133,11 @@ export function usePaginationQuery<
   useEffect(() => {
     if (results.isSuccess && results.data && cacheIndividual) {
       results.data.data.forEach((item) => {
-        const id = GetItemId(item);
-        if (id) {
-          client.setQueryData([...queryKey, id], item);
+        if (individualKey) {
+          client.setQueryData(individualKey(item), item);
+        } else {
+          const id = GetItemId(item);
+          if (id) client.setQueryData([...queryKey, id], item);
         }
       });
     }
@@ -143,6 +146,7 @@ export function usePaginationQuery<
     results.data,
     client,
     cacheIndividual,
+    individualKey,
     queryKey,
     page,
   ]);

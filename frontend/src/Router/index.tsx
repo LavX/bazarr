@@ -51,6 +51,10 @@ import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
 import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
+import {
+  SourceMovieDetailView,
+  SourceSeriesDetailView,
+} from "@/pages/SourceDetail";
 import Sports from "@/pages/Sports";
 import SportsEvents from "@/pages/SportsEvents";
 import SystemAnnouncementsView from "@/pages/System/Announcements";
@@ -125,10 +129,14 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 index: true,
                 element: (
-                  <ArrMediaRoute kind="sonarr">
+                  <ArrMediaRoute kind="sonarr" sourceBrowsable={folderSeries}>
                     <SeriesView />
                   </ArrMediaRoute>
                 ),
+              },
+              {
+                path: "source/:id",
+                element: <SourceSeriesDetailView />,
               },
               {
                 path: ":id",
@@ -150,10 +158,14 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 index: true,
                 element: (
-                  <ArrMediaRoute kind="radarr">
+                  <ArrMediaRoute kind="radarr" sourceBrowsable={folderMovies}>
                     <MovieView />
                   </ArrMediaRoute>
                 ),
+              },
+              {
+                path: "source/:id",
+                element: <SourceMovieDetailView />,
               },
               {
                 path: ":id",

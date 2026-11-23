@@ -625,8 +625,6 @@ it.each(["succeeds", "fails"] as const)(
 );
 
 it.each([
-  ["series", undefined, "sonarr", "/api/series"],
-  ["movies", undefined, "radarr", "/api/movies"],
   ["sports", undefined, "sportarr", "/api/sports/leagues"],
   ["wanted", "series", "sonarr", "/api/episodes/wanted"],
   ["wanted", "movies", "radarr", "/api/movies/wanted"],

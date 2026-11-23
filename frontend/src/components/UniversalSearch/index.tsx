@@ -88,7 +88,8 @@ export default function UniversalSearch() {
         .filter(
           (item) =>
             item.id != null &&
-            (item.sonarrSeriesId != null ||
+            (item.origin === "source" ||
+              item.sonarrSeriesId != null ||
               item.radarrId != null ||
               (item.sportarrLeagueId != null &&
                 sports.enabled &&
@@ -466,15 +467,21 @@ export default function UniversalSearch() {
                 <Text className={styles.groupLabel}>In your library</Text>
                 {localMatches.map((item) => {
                   const kind =
-                    item.sportarrLeagueId != null
-                      ? "sports"
-                      : item.sonarrSeriesId != null
+                    item.origin === "source"
+                      ? item.source_kind === "show"
                         ? "series"
-                        : "movies";
+                        : "movies"
+                      : item.sportarrLeagueId != null
+                        ? "sports"
+                        : item.sonarrSeriesId != null
+                          ? "series"
+                          : "movies";
                   const path =
-                    kind === "sports"
-                      ? `/sports/${item.id}?instance=${item.arr_instance_id}`
-                      : `/${kind}/${item.id}`;
+                    item.origin === "source"
+                      ? `/${kind}/source/${item.id}`
+                      : kind === "sports"
+                        ? `/sports/${item.id}?instance=${item.arr_instance_id}`
+                        : `/${kind}/${item.id}`;
                   return (
                     <Link
                       className={styles.quickMatch}

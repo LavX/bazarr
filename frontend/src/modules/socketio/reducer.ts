@@ -44,6 +44,24 @@ function invalidateSourceWanted() {
   });
 }
 
+function invalidateSourceLibrary() {
+  for (const kind of [QueryKeys.Series, QueryKeys.Movies]) {
+    void queryClient.invalidateQueries({
+      queryKey: [kind, "library"],
+      predicate: ({ queryKey }) => {
+        const scope = queryKey[2];
+        return (
+          typeof scope === "object" &&
+          scope !== null &&
+          "includeSources" in scope &&
+          scope.includeSources === true
+        );
+      },
+    });
+  }
+  void queryClient.invalidateQueries({ queryKey: ["source-detail"] });
+}
+
 const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
 
 // The backend remembers 50 failed and 50 completed jobs beside the ones still
@@ -361,7 +379,14 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     },
     {
       key: "source-item",
-      any: invalidateSourceWanted,
+      any: () => {
+        invalidateSourceWanted();
+        invalidateSourceLibrary();
+      },
+    },
+    {
+      key: "source-group",
+      any: invalidateSourceLibrary,
     },
     {
       key: "reset-episode-wanted",

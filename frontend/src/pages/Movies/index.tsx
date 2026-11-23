@@ -15,7 +15,6 @@ import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faArrowUp,
   faBookmark,
-  faCheck,
   faCircleDown,
   faEllipsisVertical,
   faFileExport,
@@ -26,27 +25,27 @@ import {
   faSpellCheck,
   faSync,
   faToolbox,
-  faUndo,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
-import { uniqBy } from "lodash";
-import {
-  useMovieModification,
-  useMoviesPagination,
-  useSystemSettings,
-} from "@/apis/hooks";
-import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { useMovieModification, useSystemSettings } from "@/apis/hooks";
+import { useMovieLibrary } from "@/apis/hooks/library";
 import { useAppTitle } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
+import {
+  getLibraryOwnerKey,
+  getLibraryRowKey,
+  libraryItemPath,
+  LibraryRow,
+} from "@/apis/raw/library";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList, InstanceBadge, ScorePill } from "@/components/bazarr";
+import { AudioList, ScorePill } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
-import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MassCombineModal } from "@/components/forms/MassCombineForm";
 import { MassSyncModal } from "@/components/forms/MassSyncForm";
@@ -61,7 +60,12 @@ import ItemView, {
   SubtitlesFilter,
   SubtitlesStatus,
 } from "@/pages/views/ItemView";
-import { BuildKey, GetItemId } from "@/utilities";
+import {
+  LibrarySourceRowActions,
+  LibrarySourceSelectionActions,
+} from "@/pages/views/LibrarySourceActions";
+import { useLibraryProfileEdit } from "@/pages/views/useLibraryProfileEdit";
+import { BuildKey } from "@/utilities";
 
 function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
   return `${upstreamId}:${arrInstanceId ?? ""}`;
@@ -77,14 +81,7 @@ const MovieView: FunctionComponent = () => {
   const [subtitlesFilter, setSubtitlesFilter] =
     useState<SubtitlesFilter>("any");
   const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("any");
-  const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
   const [tagFilter, setTagFilter] = useState<string[]>([]);
-  const {
-    multiInstance,
-    nameById: instanceNameById,
-    defaultId: instanceDefaultId,
-    options: instanceOptions,
-  } = useArrInstanceLabels("radarr");
 
   // The acceptance threshold that labels the "below threshold" score group and
   // drives it; undefined until settings load. Movies use the movie minimum.
@@ -92,21 +89,37 @@ const MovieView: FunctionComponent = () => {
   const scoreThreshold = settings?.general.minimum_score_movie;
 
   const scoreValue = useCallback(
-    (movie: Item.Movie) => movie.lowest_subtitle_score ?? null,
+    (movie: LibraryRow<Item.Movie>) => movie.lowest_subtitle_score ?? null,
     [],
   );
 
   // A movie with no language profile has nothing to complete, so it is
   // untracked and belongs to neither group. Otherwise it is complete when
   // nothing is missing.
-  const subtitlesStatus = useCallback((movie: Item.Movie): SubtitlesStatus => {
-    if (movie.profileId == null) return "untracked";
-    return movie.missing_subtitles.length === 0 ? "complete" : "missing";
-  }, []);
+  const subtitlesStatus = useCallback(
+    (movie: LibraryRow<Item.Movie>): SubtitlesStatus => {
+      if (movie.profileId == null) return "untracked";
+      return !movie.missing_subtitles?.length ? "complete" : "missing";
+    },
+    [],
+  );
 
   // Ask the backend for the lowest-score aggregate only while the score filter
   // is active, mirroring how the list already fetches all rows for filtering.
-  const query = useMoviesPagination(true, scoreFilter !== "any");
+  const {
+    query,
+    labels,
+    arrNames,
+    defaultArr,
+    hasSources,
+    showBadge,
+    showAttention,
+    ownerFilter,
+    canUseSourceLibrary,
+    needsAttention,
+    onNeedsAttentionChange,
+    clearSourceFilters,
+  } = useMovieLibrary(scoreFilter !== "any");
   const { data: upgradableData } = useUpgradableItems();
   const upgradableMovieKeys = useMemo(
     () =>
@@ -120,76 +133,14 @@ const MovieView: FunctionComponent = () => {
     [upgradableData?.movieKeys, upgradableData?.movies],
   );
 
-  const [selections, setSelections] = useState<Item.Movie[]>([]);
-  const [dirties, setDirties] = useState<Item.Movie[]>([]);
-  const setProfiles = useCallback(
-    (id: number | null) => {
-      const newItems = selections.map((v) => ({ ...v, profileId: id }));
-      setDirties((dirty) => uniqBy([...newItems, ...dirty], GetItemId));
-    },
-    [selections],
+  const [selections, setSelections] = useState<LibraryRow<Item.Movie>[]>([]);
+  const { profileToolbar } = useLibraryProfileEdit(
+    "movies",
+    selections,
+    modifyMovie.mutateAsync,
   );
 
-  const { mutateAsync } = modifyMovie;
-
-  const save = useCallback(() => {
-    const chunkSize = 1000;
-    const form: FormType.ModifyItem = { id: [], profileid: [] };
-    dirties.forEach((v) => {
-      const id = GetItemId(v);
-      if (id) {
-        form.id.push(id);
-        form.profileid.push(v.profileId);
-      }
-    });
-    const mutateInChunks = async (
-      ids: number[],
-      profileIds: (number | null)[],
-    ) => {
-      if (ids.length === 0) return;
-      await mutateAsync({
-        id: ids.slice(0, chunkSize),
-        profileid: profileIds.slice(0, chunkSize),
-      });
-      await mutateInChunks(ids.slice(chunkSize), profileIds.slice(chunkSize));
-    };
-    return mutateInChunks(form.id, form.profileid);
-  }, [dirties, mutateAsync]);
-
-  const profileToolbar = useMemo(() => {
-    if (selections.length === 0 && dirties.length === 0) return undefined;
-    return (
-      <Group gap="xs">
-        <Toolbox.Button
-          icon={faLanguage}
-          disabled={selections.length === 0}
-          onClick={() => {
-            modals.openContextModal(ChangeProfileModal, {
-              onSelect: setProfiles,
-            });
-          }}
-        >
-          Change Profile
-        </Toolbox.Button>
-        {dirties.length > 0 && (
-          <>
-            <Toolbox.Button icon={faUndo} onClick={() => setDirties([])}>
-              Cancel
-            </Toolbox.Button>
-            <Toolbox.MutateButton
-              icon={faCheck}
-              promise={save}
-              onSuccess={() => setDirties([])}
-            >
-              Save
-            </Toolbox.MutateButton>
-          </>
-        )}
-      </Group>
-    );
-  }, [selections, dirties, modals, setProfiles, save]);
-
-  const columns = useMemo<ColumnDef<Item.Movie>[]>(
+  const columns = useMemo<ColumnDef<LibraryRow<Item.Movie>>[]>(
     () => [
       {
         id: "selection",
@@ -213,26 +164,28 @@ const MovieView: FunctionComponent = () => {
       },
       {
         id: "monitored",
-        cell: ({
-          row: {
-            original: { monitored },
-          },
-        }) => (
-          <Tooltip
-            label={monitored ? "Monitored in Radarr" : "Unmonitored in Radarr"}
-          >
-            <FontAwesomeIcon icon={monitored ? faBookmark : farBookmark} />
-          </Tooltip>
-        ),
+        cell: ({ row: { original } }) =>
+          original.origin === "source" ? null : (
+            <Tooltip
+              label={
+                original.monitored
+                  ? "Monitored in Radarr"
+                  : "Unmonitored in Radarr"
+              }
+            >
+              <FontAwesomeIcon
+                icon={original.monitored ? faBookmark : farBookmark}
+              />
+            </Tooltip>
+          ),
       },
       {
         id: "upgradable",
-        cell: ({
-          row: {
-            original: { radarrId, arr_instance_id },
-          },
-        }) =>
-          upgradableMovieKeys.has(upgradableKey(radarrId, arr_instance_id)) ? (
+        cell: ({ row: { original } }) =>
+          original.origin !== "source" &&
+          upgradableMovieKeys.has(
+            upgradableKey(original.radarrId, original.arr_instance_id),
+          ) ? (
             <Tooltip label="Low match score, upgrading may find a better subtitle">
               <FontAwesomeIcon
                 icon={faCircleDown}
@@ -245,35 +198,29 @@ const MovieView: FunctionComponent = () => {
       {
         header: "Name",
         accessorKey: "title",
-        cell: ({
-          row: {
-            original: { title, id },
-          },
-        }) => {
-          const target = `/movies/${id}`;
+        cell: ({ row: { original } }) => {
+          const target = libraryItemPath("movies", original);
           return (
             <Anchor className="table-primary" component={Link} to={target}>
-              {title}
+              {original.title}
             </Anchor>
           );
         },
       },
-      // Owning Radarr instance (#156). Only shown when more than one Radarr is
-      // configured. Every row is labeled: the default instance uses a muted
-      // grey badge and the other instances an accent badge so they stand out.
-      ...(multiInstance
+      ...(showBadge
         ? [
             {
               id: "instance",
-              header: "Instance",
+              header: hasSources ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
-                <InstanceBadge
-                  instanceId={original.arr_instance_id}
-                  defaultId={instanceDefaultId}
-                  nameById={instanceNameById}
+                <SourceBadge
+                  row={original}
+                  labels={labels}
+                  arrNames={arrNames}
+                  defaultArr={defaultArr}
                 />
               ),
-            } as ColumnDef<Item.Movie>,
+            } as ColumnDef<LibraryRow<Item.Movie>>,
           ]
         : []),
       {
@@ -313,7 +260,7 @@ const MovieView: FunctionComponent = () => {
         }) => {
           return (
             <>
-              {missingSubtitles.map((v) => (
+              {missingSubtitles?.map((v) => (
                 <Badge
                   mr="xs"
                   color="yellow"
@@ -338,13 +285,21 @@ const MovieView: FunctionComponent = () => {
                   original: { lowest_subtitle_score: lowestScore },
                 },
               }) => <ScorePill score={lowestScore} />,
-            } as ColumnDef<Item.Movie>,
+            } as ColumnDef<LibraryRow<Item.Movie>>,
           ]
         : []),
       {
         id: "actions",
         cell: ({ row }) => {
           const item = row.original;
+          if (item.origin === "source")
+            return (
+              <LibrarySourceRowActions
+                kind="movies"
+                row={item}
+                canUseLibrary={canUseSourceLibrary}
+              />
+            );
           const batchItem: BatchItem = {
             type: "movie",
             radarrId: item.radarrId,
@@ -498,25 +453,39 @@ const MovieView: FunctionComponent = () => {
       modals,
       modifyMovie,
       upgradableMovieKeys,
-      multiInstance,
-      instanceNameById,
-      instanceDefaultId,
+      showBadge,
+      canUseSourceLibrary,
+      hasSources,
+      labels,
+      arrNames,
+      defaultArr,
       scoreFilter,
     ],
   );
 
   const selectionToolbar = useMemo(() => {
     if (selections.length === 0) return undefined;
+    const sourceRows = selections.filter((item) => item.origin === "source");
+    if (sourceRows.length === selections.length)
+      return (
+        <LibrarySourceSelectionActions
+          kind="movies"
+          rows={sourceRows}
+          canUseLibrary={canUseSourceLibrary}
+        />
+      );
+    if (sourceRows.length > 0) return undefined;
+    const arrRows = selections.filter((item) => item.origin !== "source");
 
     const toBatchItems = (): BatchItem[] =>
-      selections.map((m) => ({
+      arrRows.map((m) => ({
         type: "movie" as const,
         radarrId: m.radarrId,
         arr_instance_id: m.arr_instance_id ?? undefined,
       }));
 
     const toWantedItems = (): WantedItem[] =>
-      selections.map((m) => ({
+      arrRows.map((m) => ({
         type: "movie" as const,
         radarrId: m.radarrId,
         title: m.title,
@@ -647,7 +616,7 @@ const MovieView: FunctionComponent = () => {
         </Menu>
       </Group>
     );
-  }, [selections, modals]);
+  }, [selections, modals, canUseSourceLibrary]);
 
   useDocumentTitle(`Movies - ${useAppTitle()}`);
 
@@ -669,9 +638,18 @@ const MovieView: FunctionComponent = () => {
         onScoreFilterChange={setScoreFilter}
         scoreValue={scoreValue}
         scoreThreshold={scoreThreshold}
-        instanceOptions={multiInstance ? instanceOptions : undefined}
-        instanceValues={instanceFilter}
-        onInstanceValuesChange={setInstanceFilter}
+        instanceOptions={ownerFilter.options}
+        instanceValues={ownerFilter.values}
+        onInstanceValuesChange={ownerFilter.onChange}
+        instanceLabel={ownerFilter.label}
+        showSingleInstance={ownerFilter.showSingle}
+        getInstanceValue={getLibraryOwnerKey}
+        needsAttention={needsAttention}
+        onNeedsAttentionChange={
+          showAttention ? onNeedsAttentionChange : undefined
+        }
+        clearSourceFilters={clearSourceFilters}
+        getRowId={getLibraryRowKey}
         tagValues={tagFilter}
         onTagValuesChange={setTagFilter}
         enableRowSelection
