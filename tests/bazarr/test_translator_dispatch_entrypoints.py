@@ -510,7 +510,6 @@ def test_history_database_failure_keeps_a_dispatch_retry_recoverable(
         env, monkeypatch, editor_runtime_queue, operation, caplog):
     import sqlalchemy as sa
 
-    from app.database import TableTranslationHistory
     from subtitles.tools.translate import editor
     from subtitles.tools.translate.runtime.dispatch import Dispatcher
     from subtitles.tools.translate.runtime.history import HistoryStore
@@ -520,36 +519,59 @@ def test_history_database_failure_keeps_a_dispatch_retry_recoverable(
     first = editor.enqueue_editor_translation(lines, "en", "hu")
     job = queue._reserve_next_job()
     assert job.job_id == first
-    failed_operations = []
+    queried = []
+    engine = env.session.get_bind()
 
     def unavailable(*args, **kwargs):
+        row = env.last_job()
+        assert (row.state, row.queue_job_id) == ("running", first)
         raise RuntimeError("could not read the selected backend")
 
     def fail_lookup(self, job_id):
-        failed_operations.append(job_id)
-        self._session.execute(sa.text("SELECT missing_test_column FROM table_translation_history"))
+        queried.append(job_id)
+        self._session.execute(sa.text("SELECT missing_test_column FROM translation_history"))
 
-    def fail_update(mapper, connection, target):
-        if target.status == "awaiting_retry":
-            failed_operations.append(target.job_id)
-            connection.exec_driver_sql("UPDATE table_translation_history SET missing_test_column = 1")
+    if operation == "update":
+        with engine.begin() as connection:
+            if connection.dialect.name == "sqlite":
+                connection.exec_driver_sql("""
+                    CREATE TRIGGER reject_history_retry BEFORE UPDATE ON translation_history
+                    FOR EACH ROW WHEN NEW.status = 'awaiting_retry'
+                    BEGIN SELECT RAISE(ABORT, 'fixture history write failed'); END
+                """)
+            else:
+                connection.exec_driver_sql("""
+                    CREATE FUNCTION reject_history_retry() RETURNS trigger AS $failure$
+                    BEGIN RAISE EXCEPTION 'fixture history write failed'; END;
+                    $failure$ LANGUAGE plpgsql
+                """)
+                connection.exec_driver_sql("""
+                    CREATE TRIGGER reject_history_retry BEFORE UPDATE ON translation_history
+                    FOR EACH ROW WHEN (NEW.status = 'awaiting_retry') EXECUTE FUNCTION reject_history_retry()
+                """)
 
     with monkeypatch.context() as failure:
         failure.setattr(Dispatcher, "_candidates", unavailable)
         if operation == "lookup":
             failure.setattr(HistoryStore, "get_by_job", fail_lookup)
-        else:
-            sa.event.listen(TableTranslationHistory, "before_update", fail_update)
         try:
             assert not queue._run_job(job)
         finally:
             if operation == "update":
-                sa.event.remove(TableTranslationHistory, "before_update", fail_update)
+                with engine.begin() as connection:
+                    if connection.dialect.name == "sqlite":
+                        connection.exec_driver_sql("DROP TRIGGER reject_history_retry")
+                    else:
+                        connection.exec_driver_sql("DROP TRIGGER reject_history_retry ON translation_history")
+                        connection.exec_driver_sql("DROP FUNCTION reject_history_retry()")
 
     assert job.status == "failed" and job.error["reason"] == "unexpected_error"
     assert "Exception raised while running function: could not read the selected backend" in caplog.text
     row = env.last_job()
-    assert failed_operations == [str(row.id)]
+    if operation == "lookup":
+        assert queried == [str(row.id)] and "missing_test_column" in caplog.text
+    else:
+        assert "fixture history write failed" in caplog.text
     assert (row.state, row.error_class) == ("awaiting_retry", "internal")
     assert row.queue_job_id is None and not env.requests()
     retry = editor.enqueue_editor_translation(lines, "en", "hu")
