@@ -151,6 +151,14 @@ class Server:
         if self.server:
             print("Closing webserver...")
             self.server.close()
+        # Stop admitting link lookups before the database closes. Only loaded
+        # lookup workers need shutdown, including on a restore's restart.
+        media_server_links = sys.modules.get("media_servers.links")
+        if media_server_links:
+            try:
+                media_server_links.shutdown()
+            except Exception:
+                pass
         # Translator workers run in processes of their own. Nothing to end, and nothing to import, when the
         # translation runtime was never bound to them.
         translator_binding = sys.modules.get("subtitles.tools.translate.runtime.worker_binding")

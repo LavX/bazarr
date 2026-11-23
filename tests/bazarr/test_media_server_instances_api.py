@@ -49,6 +49,140 @@ def test_authenticated_crud_uuid_safe_key_and_status(instance_api, kind):
     assert instance_api.get(path + '/status', headers=HEADERS).status_code == 404
 
 
+@pytest.mark.parametrize('lifecycle', ['delete-idle', 'delete-active', 'restore'])
+def test_play_on_workers_follow_destination_lifecycle(instance_api, monkeypatch, tmp_path, lifecycle):
+    import json
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+    from threading import Event, current_thread
+    from urllib.parse import urlsplit
+
+    import requests
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app import database
+    from media_servers import links
+
+    engine = create_engine(f'sqlite:///{tmp_path / "library.db"}')
+    database.Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    monkeypatch.setattr(database, 'session_factory', sessions)
+    monkeypatch.setattr(links, '_lanes', {})
+    monkeypatch.setattr(links, '_lanes_closed', False, raising=False)
+    with sessions.begin() as session:
+        session.add_all(database.TableMovies(id=i, path='/movies/Film.mkv', title='Film', tmdbId=str(i))
+                        for i in range(1, 7))
+
+    workers = set()
+    both_running, release, queued = Event(), Event(), Event()
+    wire = []
+
+    def send(_session, request, **_kwargs):
+        url = urlsplit(request.url)
+        assert url.path.startswith('/prefix/api/v1/catalog/items/movie-tmdb-')
+        content_id = url.path.rsplit('/', 1)[-1]
+        wire.append((url.hostname, content_id))
+        if url.hostname == 'a.example' and content_id in ('movie-tmdb-2', 'movie-tmdb-3'):
+            workers.add(current_thread())
+            if len(workers) == 2:
+                both_running.set()
+            assert release.wait(5)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({'content_id': content_id}).encode()
+        response._content_consumed = True
+        return response
+
+    monkeypatch.setattr(requests.Session, 'send', send)
+
+    def create(name):
+        result = instance_api.post(ROOT, json=payload('silo', name), headers=HEADERS)
+        assert result.status_code == 201
+        return result.json['id']
+
+    removed, live = create('A'), create('B')
+
+    def resolve(destination, movie):
+        response = instance_api.get('/api/system/media-server-links/resolve', headers=HEADERS,
+                                    query_string={'instance_id': destination, 'media_type': 'movie', 'id': movie})
+        assert response.status_code == 200
+        return response.json['state']
+
+    if lifecycle == 'restore':
+        from types import SimpleNamespace
+
+        from waitress import server as waitress_server
+        from utilities import backup
+
+        # The real restore callback closes the server before exiting the process.
+        calls = []
+        listener = SimpleNamespace(close=lambda: calls.append('close'))
+        monkeypatch.setattr(waitress_server, 'create_server', lambda *args, **kwargs: listener)
+        from app import server
+        monkeypatch.setattr(server.webserver, 'server', listener)
+        monkeypatch.setattr(backup, 'restart_bazarr', lambda: calls.append('restart'))
+
+    def pool_for(entry):
+        return getattr(entry, 'lane', entry).pool
+
+    try:
+        assert resolve(removed, 1) == resolve(live, 1) == 'resolved'
+        live_lane = links._lanes[live]
+        with ThreadPoolExecutor(max_workers=3) as requests_pool:
+            active = [requests_pool.submit(resolve, removed, i) for i in (2, 3)]
+            try:
+                assert both_running.wait(3), wire
+                if lifecycle == 'delete-idle':
+                    release.set()
+                    assert [future.result(2) for future in active] == ['resolved', 'resolved']
+                else:
+                    pool = pool_for(links._lanes[removed])
+                    submit = pool.submit
+
+                    def observed_submit(*args, **kwargs):
+                        future = submit(*args, **kwargs)
+                        queued.set()
+                        return future
+
+                    monkeypatch.setattr(pool, 'submit', observed_submit)
+                    pending = requests_pool.submit(resolve, removed, 4)
+                    assert queued.wait(3)
+
+                if lifecycle == 'restore':
+                    backup._restart_after_restore()
+                    assert calls == ['close', 'restart']
+                else:
+                    assert instance_api.delete(f'{ROOT}/{removed}', headers=HEADERS).status_code == 204
+                    assert resolve(removed, 5) == 'not_found'
+                    assert resolve(live, 5) == 'resolved'
+                    assert links._lanes[live] is live_lane
+
+                if lifecycle != 'delete-idle':
+                    try:
+                        canceled = pending.result(1)
+                    except FutureTimeout:
+                        canceled = None
+            finally:
+                release.set()
+            if lifecycle != 'delete-idle':
+                assert (canceled, *(future.result(2) for future in active)) == ('unreachable',) * 3
+            assert removed not in links._lanes
+            assert sorted(item for host, item in wire if host == 'a.example') == [
+                'movie-tmdb-1', 'movie-tmdb-2', 'movie-tmdb-3']
+            for worker in workers:
+                worker.join(1)
+            assert not any(worker.is_alive() for worker in workers)
+            if lifecycle == 'restore':
+                assert not links._lanes
+                assert resolve(live, 6) == 'unreachable'
+    finally:
+        for instance_id in (removed, live):
+            lane = links._lanes.pop(instance_id, None)
+            if lane is not None:
+                pool_for(lane).shutdown(wait=True, cancel_futures=True)
+        engine.dispose()
+
+
 def test_the_signed_in_plex_accounts_row_is_removed_by_signing_out_not_by_delete(instance_api, monkeypatch):
     """The startup import rebuilds the account's row, so a delete would come back."""
     from app.config import settings as app_settings

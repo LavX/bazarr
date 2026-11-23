@@ -51,8 +51,11 @@ class NativeConfiguration:
                                                   master_enabled=self.masters[snapshot.kind])
 
     def delete(self, instance_id):
+        from .links import retire_destination
+
         with self.lock:
             self.snapshots.pop(instance_id, None)
+            retire_destination(instance_id)
 
     def publish_masters(self, settings):
         with self.lock:

@@ -289,7 +289,7 @@ def test_a_row_held_while_its_lookup_waits_for_a_worker_is_never_sent_the_creden
     first = threading.Thread(target=lambda: answers.update(first=links.resolve(plex.id, 'movie', 1, configuration)))
     first.start()
     assert connected.wait(5)
-    lane, queued = links._lanes[plex.id], threading.Event()
+    lane, queued = links._lanes[plex.id].lane, threading.Event()
     submit = lane.pool.submit
 
     def queue(fn):

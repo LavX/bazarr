@@ -13,8 +13,10 @@ import logging
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, replace
+from itertools import count
 from threading import Event, Lock
 from urllib.parse import quote
+from weakref import WeakSet
 
 from dogpile.cache import make_region
 
@@ -72,22 +74,69 @@ class _Lane:
             self.overdue -= 1
 
 
+class _DestinationLanes:
+    """The lookup lanes and cache namespace of one saved destination."""
+
+    def __init__(self):
+        self.lane = None
+        self.pools = WeakSet()
+        self.closed = Event()
+        self.cache_scope = next(_cache_scopes)
+
+    def for_revision(self, revision):
+        # An edit gives new requests fresh workers. Previously admitted
+        # requests can still read the edited row when their worker starts.
+        if self.lane is None or self.lane.revision != revision:
+            self.lane = _Lane(revision)
+            self.pools.add(self.lane.pool)
+        return self.lane
+
+    def ensure_open(self):
+        if self.closed.is_set():
+            raise MediaServerError('configuration_changed')
+
+    def close(self):
+        self.closed.set()
+        # A worker may hold an HTTP request or need the configuration lock.
+        # Cancel queued work and let running work finish without joining here.
+        for pool in self.pools:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
+_cache_scopes = count(1)
 _lanes = {}
 _lanes_lock = Lock()
+_lanes_closed = False
 
 
 def _lane(snapshot):
-    """The destination's lane. A saved edit starts a fresh one.
-
-    A lookup still hanging on the old address says nothing about the new one.
-    The old lane is dropped rather than shut down: its workers finish what
-    they hold and exit once nothing refers to it.
-    """
+    # The caller holds the configuration lock from selecting the snapshot
+    # through admission, so a deleted row cannot acquire a new lane.
     with _lanes_lock:
-        lane = _lanes.get(snapshot.id)
-        if lane is None or lane.revision != snapshot.revision:
-            lane = _lanes[snapshot.id] = _Lane(snapshot.revision)
-        return lane
+        if _lanes_closed:
+            return None, None
+        destination = _lanes.get(snapshot.id)
+        if destination is None:
+            destination = _lanes[snapshot.id] = _DestinationLanes()
+        return destination, destination.for_revision(snapshot.revision)
+
+
+def retire_destination(instance_id):
+    """Retire the deleted destination under the configuration lock."""
+    with _lanes_lock:
+        destination = _lanes.pop(instance_id, None)
+        if destination is not None:
+            destination.close()
+
+
+def shutdown():
+    """Stop accepting lookup work as the process shuts down."""
+    global _lanes_closed
+    with _lanes_lock:
+        _lanes_closed = True
+        for destination in _lanes.values():
+            destination.close()
+        _lanes.clear()
 
 
 @dataclass(frozen=True)
@@ -96,6 +145,7 @@ class Target:
     display_name: str
     # The file on the server, for the kinds that map paths; None otherwise.
     mapped_path: str | None
+    cache_scope: int = 0
 
 
 def destinations(native):
@@ -185,16 +235,27 @@ def resolve(instance_id, media_type, local_id, native=None):
     if row is None:
         return None
     native = native or _native()
-    target = next((target for target in candidates(row, media_type, native)
-                   if target.snapshot.id == instance_id), None)
-    if target is None:
-        return {'instance_id': instance_id, 'state': 'not_found', 'url': None}
+    with native.lock:
+        target = next((target for target in candidates(row, media_type, native)
+                       if target.snapshot.id == instance_id), None)
+        if target is None:
+            return {'instance_id': instance_id, 'state': 'not_found', 'url': None}
+        destination, lane = _lane(target.snapshot)
+    if destination is None:
+        return _unreachable(instance_id)
+    target = replace(target, cache_scope=destination.cache_scope)
     # The file the answer depends on. Jellyfin maps no path, but it finds a
     # recording by its file name, so a replaced recording is asked again.
     path = target.mapped_path or (row.video_path if media_type == 'sports' else None)
-    key = f'{instance_id}:{target.snapshot.revision}:{media_type}:{local_id}:{path}'
-    return links_region.get_or_create(key, lambda: _answer(target, media_type, row, native),
-                                      should_cache_fn=lambda answer: answer['state'] != 'unreachable')
+    key = f'{instance_id}:{target.cache_scope}:{target.snapshot.revision}:{media_type}:{local_id}:{path}'
+    answer = links_region.get_or_create(
+        key, lambda: _answer(target, media_type, row, native, destination, lane),
+        should_cache_fn=lambda answer: answer['state'] != 'unreachable')
+    return _unreachable(instance_id) if destination.closed.is_set() else answer
+
+
+def _unreachable(instance_id):
+    return {'instance_id': instance_id, 'state': 'unreachable', 'url': None}
 
 
 def _native():
@@ -202,7 +263,7 @@ def _native():
     return get_native_configuration()
 
 
-def _current(native, instance_id):
+def _current(native, instance_id, destination):
     """The destination as it is now, read the way a refresh reads it, and its guard.
 
     ``read`` asks plex.tv about a held account row and, once plex.tv lists
@@ -212,6 +273,7 @@ def _current(native, instance_id):
     sent. The guard is the refreshes' own, from the revision read: a change
     landing after the read stops the lookup at its next request.
     """
+    destination.ensure_open()
     revision, snapshot, _changing = native.read(instance_id)
     if not snapshot.enabled:
         raise MediaServerError('connection_disabled')
@@ -219,14 +281,17 @@ def _current(native, instance_id):
         raise MediaServerError(snapshot.configuration_error)
     if not snapshot.sendable:
         raise MediaServerError('server_not_listed')
-    return snapshot, lambda: native.ensure_current(instance_id, revision)
+    def guard():
+        destination.ensure_open()
+        native.ensure_current(instance_id, revision)
+
+    return snapshot, guard
 
 
-def _answer(target, media_type, row, native):
+def _answer(target, media_type, row, native, destination, lane):
     snapshot = target.snapshot
-    answer = {'instance_id': snapshot.id, 'state': 'unreachable', 'url': None}
+    answer = _unreachable(snapshot.id)
     budget = BUDGETS[snapshot.kind]
-    lane = _lane(snapshot)
     with lane.lock:
         if lane.overdue >= SLOTS:
             # Every worker this destination has is still waiting on a server
@@ -241,7 +306,7 @@ def _answer(target, media_type, row, native):
         started.set()
         # The row was resolved before this waited for a worker, up to a
         # budget, so it is read again here, before anything is sent.
-        current, guard = _current(native, snapshot.id)
+        current, guard = _current(native, snapshot.id, destination)
         if current.kind in LIBRARY_KEYS:
             return _lookup(replace(target, snapshot=current), media_type, row, guard)
         # And the file is mapped again from the row as read, as a refresh maps
@@ -253,7 +318,15 @@ def _answer(target, media_type, row, native):
             return None
         return _lookup(replace(target, snapshot=current, mapped_path=mapped), media_type, row, guard)
 
-    future = lane.pool.submit(run)
+    try:
+        future = lane.pool.submit(run)
+    except RuntimeError:
+        if destination.closed.is_set():
+            return answer
+        raise
+    # A queued lookup canceled by shutdown never calls run(). Wake its waiter
+    # so it observes the cancellation without waiting for the queue budget.
+    future.add_done_callback(lambda _future: started.set())
     # The budget is the lookup's own, counted from when it starts. Waiting for
     # a worker, behind this destination's other rows only, is bounded by one
     # budget as well, after which a lookup that never started is withdrawn.
@@ -272,6 +345,8 @@ def _answer(target, media_type, row, native):
     except Exception as error:
         logger.debug('BAZARR media server link lookup failed on a %s destination: %s',
                      snapshot.kind, getattr(error, 'code', None) or type(error).__name__)
+        return answer
+    if destination.closed.is_set():
         return answer
     if url is None:
         answer['state'] = 'not_found'
@@ -303,7 +378,7 @@ def plex_web_base(snapshot):
     return f'{snapshot.external_url.rstrip("/")}/web/index.html' if snapshot.external_url else None
 
 
-def _emby_server_id(snapshot, client, ensure_current):
+def _emby_server_id(snapshot, client, ensure_current, cache_scope=0):
     """The id Emby's web client routes by, asked once per revision.
 
     The guard runs inside the fill, right before the request. A caller that
@@ -314,7 +389,7 @@ def _emby_server_id(snapshot, client, ensure_current):
     def create():
         ensure_current()
         return client.server_id()
-    return links_region.get_or_create(f'emby-server-id:{snapshot.id}:{snapshot.revision}', create)
+    return links_region.get_or_create(f'emby-server-id:{snapshot.id}:{cache_scope}:{snapshot.revision}', create)
 
 
 def _lookup(target, media_type, row, ensure_current):
@@ -335,7 +410,8 @@ def _lookup(target, media_type, row, ensure_current):
             if item_id is None:
                 return None
             ensure_current()
-            return emby_url(_browser_base(snapshot), item_id, _emby_server_id(snapshot, client, ensure_current))
+            server_id = _emby_server_id(snapshot, client, ensure_current, target.cache_scope)
+            return emby_url(_browser_base(snapshot), item_id, server_id)
     if snapshot.kind == 'jellyfin':
         from jellyfin.refresh import JellyfinRefreshClient
         with JellyfinRefreshClient(snapshot, guard=ensure_current) as client:
