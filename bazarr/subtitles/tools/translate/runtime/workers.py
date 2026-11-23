@@ -207,6 +207,12 @@ class PoolWorkers:
             self._ports[key] = wanted
 
     def submit(self, plugin_id, request, secrets, *, context, on_progress):
+        from provider_hub.datadir import dispatch
+
+        with dispatch(plugin_id):
+            return self._submit(plugin_id, request, secrets, context=context, on_progress=on_progress)
+
+    def _submit(self, plugin_id, request, secrets, *, context, on_progress):
         key = self._ensure(plugin_id)
         self._follow_ports(plugin_id, key)
         handle = self._pool.submit(key, TRANSLATE_OP, {"request": request}, secrets=dict(secrets) or None,
@@ -261,6 +267,12 @@ class PoolWorkers:
                              "secrets": dict(secrets or {})}, sender="host")
 
     def call(self, plugin_id, op, params, secrets, *, timeout):
+        from provider_hub.datadir import dispatch
+
+        with dispatch(plugin_id):
+            return self._call(plugin_id, op, params, secrets, timeout=timeout)
+
+    def _call(self, plugin_id, op, params, secrets, *, timeout):
         from provider_hub.runtime.errors import SessionBusy
         from provider_hub.runtime.frames import FrameError
         from provider_hub.runtime.pool import PoolCodes, PoolError, WorkerKilled
@@ -328,6 +340,30 @@ class PoolWorkers:
             return False
         # An entry in one of those states can still have a worker that is draining or whose end is not confirmed yet.
         return self._pool.teardown_confirmed(key) and not self._pool.status()["workers"][key]["retiring"]
+
+    def settle_data(self, plugin_id, timeout: float) -> bool:
+        """Wait out the current worker, and discard its folder budgets before a new release starts."""
+        import time
+
+        deadline = time.monotonic() + timeout
+        key = self._key_for(plugin_id)
+        # A busy worker stays available if the bound passes. Retiring it early
+        # would allow the next job to start another process on the same data.
+        while True:
+            worker = self._pool.status()["workers"].get(key, {})
+            if not (worker.get("in_flight") or worker.get("retiring") or worker.get("state") == "starting"):
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(remaining, 0.1))
+        self.retire(plugin_id)
+        while not self.idle(plugin_id):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(remaining, 0.1))
+        return self._pool.unregister(key)
 
     def retire(self, plugin_id):
         """Take the plugin's worker out of service once the jobs it holds are done. The next request starts a new

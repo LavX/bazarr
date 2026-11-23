@@ -64,11 +64,12 @@ import logging
 import os
 import select
 import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 
-from . import spawn
+from . import activity, spawn
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,8 @@ class SweepResult:
     truncated: bool = False
     sessions: list[SweptSession] = field(default_factory=list)
     unreadable: int = 0
+    verify_writers: bool = False
+    launchers: dict[int, str] = field(default_factory=dict)
 
     @property
     def ended(self) -> int:
@@ -143,6 +146,7 @@ def configure_owner(config_dir: "str | os.PathLike") -> "str | None":
     Call once at boot, before any worker starts. Without ``/proc`` (or an unreadable start
     time for this process) nothing can be proved later, so nothing is marked.
     """
+    activity.configure(config_dir)
     start = spawn._start_mark(os.getpid()) if _has_proc() and _proc_is_ours() else None
     if start is None:
         spawn.set_owner_marker(None)
@@ -394,14 +398,23 @@ def _scan(instance: str, deadline: float, result: SweepResult) -> "tuple[dict[in
         if time.monotonic() > deadline:
             result.truncated = True
             break
-        if not _ours(pid, my_euid) or not _same_pid_namespace(pid):
+        if not _ours(pid, my_euid):
             continue
+        if not _same_pid_namespace(pid):
+            if result.verify_writers:
+                _track_writer_launcher(entry, instance, result)
+            continue
+        unreadable = False
         try:
             value = _bound_marker(entry)
         except PermissionError:
+            unreadable, value = True, None
+        if result.verify_writers and value is None and _track_writer_launcher(entry, instance, result):
+            continue
+        if unreadable:
             result.unreadable += 1
             continue
-        if value is None:
+        if value is None or value == spawn.owner_marker():
             continue
         parsed = _parse_marker(value)
         if parsed is None or parsed[0] != instance:
@@ -423,6 +436,25 @@ def _is_launcher_argv(args: "list[str]") -> bool:
     """Whether an argv is the launcher's: ``python -I -S -B .../sandbox/launcher.py <fds>``."""
     wanted = os.fspath(spawn.LAUNCHER_PATH)
     return any(arg == wanted or arg.replace(os.sep, "/").endswith("/sandbox/launcher.py") for arg in args[:6])
+
+
+def _launcher_owner(args: list[str]) -> str | None:
+    prefix = "--owner="
+    return args[-1][len(prefix):] if args[-1].startswith(prefix) else None
+
+
+def _track_writer_launcher(entry: _Proc, instance: str, result: SweepResult) -> bool:
+    # A non-dumpable launcher can hide its namespace and environment, and
+    # can still be exiting after its last child is gone. Its command line
+    # can hold the data fence. Signalling still requires a marked child.
+    argv = _read_cmdline(entry.pid)
+    if not argv or not _is_launcher_argv(argv) or not _same_process(_read_proc(entry.pid), entry):
+        return False
+    owner = _launcher_owner(argv)
+    parsed = _parse_marker(owner) if owner is not None else None
+    if owner is None or (owner != spawn.owner_marker() and (parsed is None or parsed[0] == instance)):
+        result.launchers[entry.pid] = entry.start
+    return True
 
 
 def _launcher_identity(leader: _Proc, euid: int) -> bool:
@@ -613,13 +645,14 @@ def sweep_leftovers(
     *,
     instance: "str | None" = None,
     term_wait: float = TERM_WAIT_SECONDS,
+    verify_writers: bool = False,
 ) -> SweepResult:
     """End the processes a previous run of this install left behind. Never raises.
 
     ``config_dir`` (or ``instance``, an ``instance_key``) names the install; without one
     nothing can be proved and nothing is signalled.
     """
-    result = SweepResult()
+    result = SweepResult(verify_writers=verify_writers)
     try:
         if instance is None and config_dir is not None:
             instance = instance_key(config_dir)
@@ -662,8 +695,35 @@ def sweep_leftovers(
         if result.ended:
             logger.warning("Provider Hub: ended %d plugin session(s) left by a previous run", result.ended)
     except Exception:
+        result.supported = False
+        result.reason = "the leftover process sweep could not finish"
         logger.exception("Provider Hub: the leftover process sweep failed")
     return result
+
+
+def previous_workers_stopped(config_dir) -> bool:
+    """Check that no writer from the previous host still owns plugin data."""
+    if sys.platform != "linux":
+        return activity.previous_workers_stopped(config_dir)
+    result = sweep_leftovers(config_dir, verify_writers=True)
+    if (not result.supported or result.truncated or result.unreadable
+            or any(session.outcome != "ended" for session in result.sessions)):
+        return False
+    deadline = time.monotonic() + spawn.LAUNCHER_CLEANUP_SECONDS
+    for pid, started in result.launchers.items():
+        while True:
+            try:
+                state, current = spawn._stat_fields(pid)
+            except FileNotFoundError:
+                break
+            except (OSError, ValueError, IndexError):
+                return False
+            if current != started or state in {"Z", "X"}:
+                break
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(POLL_SECONDS)
+    return True
 
 
 _sweep_thread: "threading.Thread | None" = None

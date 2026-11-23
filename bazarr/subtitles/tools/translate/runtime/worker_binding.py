@@ -84,6 +84,7 @@ class Resolved:
     bundle: Path
     entry: str
     manifest: Mapping[str, Any]
+    data_key: str | None = None
 
 
 class TranslatorWorkers:
@@ -130,7 +131,8 @@ class TranslatorWorkers:
         if paths is None:
             return None
         bundle, interpreter = paths
-        return Resolved(plugin_id, interpreter, bundle, f"{module}:{name}", manifest)
+        return Resolved(plugin_id, interpreter, bundle, f"{module}:{name}", manifest,
+                        getattr(installation, "active_data_key", None))
 
     def _manifest(self, plugin_id: str) -> Mapping[str, Any] | None:
         installation = self._installation_for(plugin_id)
@@ -204,9 +206,10 @@ class TranslatorWorkers:
 
         from .host_calls import host_calls
 
-        if self.resolve(plugin_id) is None:
+        resolved = self.resolve(plugin_id)
+        if resolved is None:
             return None
-        data, temp = self._folders(plugin_id, call_id)
+        data, temp = self._folders(plugin_id, call_id, data_key=resolved.data_key)
         wanted_ports = ports or (lambda: self.ports_for(plugin_id))
         return WorkerDefinition(
             key or plugin_id, kind=KIND, cap_key=cap_key,
@@ -267,21 +270,34 @@ class TranslatorWorkers:
             removed.append(child.name)
         return removed
 
-    def _folders(self, plugin_id: str, call_id: str | None = None) -> tuple[Path, Path]:
-        base = Path(self._hub_dir()) / "run" / plugin_id
+    def _folders(self, plugin_id: str, call_id: str | None = None, *, data_key: str | None = None) -> tuple[Path, Path]:
+        root = Path(self._hub_dir())
+        base = root / "run" / plugin_id
         if call_id is not None:
             base = base / "call" / call_id
+        elif data_key:
+            from provider_hub.datadir import DataFolderError, release_path
+
+            data = release_path(root, plugin_id, data_key)
+            if data.is_symlink() or data.is_junction():
+                raise DataFolderError("The active release data folder is a link")
+            return data, base / "tmp"
         return base / "data", base / "tmp"
 
     def _spec(self, plugin_id: str, ports: Iterable[int], call_id: str | None = None):
         """One start's launch specification, built from what is installed at this moment."""
-        from provider_hub.runtime.environment import worker_environment
-        from provider_hub.sandbox.policy import PolicyError, RuntimeSpec, SandboxPolicy
+        from provider_hub.sandbox.policy import PolicyError
 
         resolved = self.resolve(plugin_id)
         if resolved is None:
             raise PolicyError("translator %s has no release that can run" % plugin_id)
-        data, temp = self._folders(plugin_id, call_id)
+        data, temp = self._folders(plugin_id, call_id, data_key=resolved.data_key)
+        return self._worker_spec(resolved, data, temp, ports)
+
+    def _worker_spec(self, resolved, data, temp, ports):
+        from provider_hub.runtime.environment import worker_environment
+        from provider_hub.sandbox.policy import RuntimeSpec, SandboxPolicy
+
         for folder in (data, temp):
             folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         root = Path(self._sdk_root or _sdk_root())
@@ -298,6 +314,32 @@ class TranslatorWorkers:
             args=("-I", "-B", os.fspath(root / "bazarr_plugin_sdk" / "_bootstrap.py"), "--entry", resolved.entry,
                   "--path", os.fspath(resolved.bundle)),
             cwd=os.fspath(resolved.bundle), env=env, policy=policy)
+
+
+    def smoke(self, validated, bundle: Path, interpreter: Path, data: Path, timeout: float | None) -> None:
+        """Run the normal translator handshake in the staged release's private data tree."""
+        from tempfile import TemporaryDirectory
+
+        from provider_hub.runtime.pool import WorkerPool, launcher_spawn
+        from provider_hub.runtime.session import SessionLimits, WorkerSession
+
+        manifest = validated.raw
+        entry = f"{manifest['entry_module']}:{manifest['entry_class']}"
+        resolved = Resolved(validated.provider_id, interpreter, bundle, entry, manifest)
+        ports = self._fixed_ports(manifest) - set(self._reserved_ports())
+        with TemporaryDirectory(prefix=".smoke-", dir=data.parent) as temporary:
+            spawn = launcher_spawn(lambda: self._worker_spec(resolved, data, Path(temporary), ports),
+                                   probe=self._probe, require_sandbox=self._require_sandbox)
+            limits = SessionLimits() if timeout is None else SessionLimits(handshake_timeout=timeout)
+            session = WorkerSession(spawn=spawn, kind=KIND, limits=limits, name=validated.provider_id)
+            try:
+                session.start()
+            finally:
+                session.close()
+            process = session.process
+            if (process.returncode is None or not session.teardown_confirmed
+                    or not WorkerPool._cleanup_confirmed(process)):
+                raise RuntimeError("The translator check could not stop every process using plugin data")
 
 
 # ------------------------------------------------------------------------------------------------ real sources
@@ -408,6 +450,12 @@ def bind_when_enabled() -> bool:
         logger.warning("Could not clear the folders of removed translators", exc_info=True)
     logger.debug("The translation runtime is bound to its translator workers")
     return True
+
+
+def settle_plugin_data(plugin_id: str, timeout: float) -> bool:
+    with _lock:
+        port = _port
+    return port is None or port.settle_data(plugin_id, timeout)
 
 
 def plugin_changed(plugin_id: str) -> None:

@@ -61,12 +61,10 @@ if args.create_db_revision:
 else:
     prepare_database_and_plugins(app)
 
-# Mark the workers this run starts, then end the leftovers of a previous run.
-# The mark goes first so nothing this run starts can be mistaken for a
-# leftover. The sweep runs on its own thread: a launcher gets a grace to finish.
+# Sweep leftovers not involved in a pending plugin-data operation. Init
+# already marked this run's workers and checked deferred data removals.
 try:
     from provider_hub.sandbox import sweep as sandbox_sweep
-    sandbox_sweep.configure_owner(args.config_dir)
     sandbox_sweep.start_sweep_in_background(args.config_dir)
 except Exception:
     logging.exception("BAZARR cannot start the leftover plugin process sweep")

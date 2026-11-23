@@ -1591,3 +1591,476 @@ def test_a_worker_is_told_apart_by_the_release_it_runs():
         with _live_clients_lock:
             for client in (old, new, plain, other):
                 _live_clients.discard(client)
+
+
+def test_data_identity_moves_with_its_release_even_for_the_same_bundle(hub):
+    from provider_hub import state_store
+    from provider_hub.state import mutate_state
+
+    _seed(alpha=_row("alpha", active="1.0.0", staged="1.0.0",
+                     active_data_key="a" * 32, staged_data_key="b" * 32))
+
+    def promote(state):
+        row = state["installations"]["alpha"]
+        row.update(active_data_key=row.pop("staged_data_key"), staged_version=None, staged_path=None,
+                   staged_python_path=None, staged_manifest=None)
+
+    before = {item.state: item.id for item in state_store.list_releases("alpha")}
+    mutate_state(promote)
+
+    after = {item.state: (item.id, item.data_key) for item in state_store.list_releases("alpha")}
+    assert after == {"active": (before["staged"], "b" * 32), "retired": (before["active"], "a" * 32)}
+
+
+def test_release_data_copy_preserves_local_links_and_rejects_external_files(tmp_path):
+    from provider_hub import datadir
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "saved").write_bytes(b"original")
+    (source / "inside").symlink_to("saved")
+    target = tmp_path / "target"
+    before = datadir.copy_folder(source, target)
+    assert (target / "inside").readlink() == Path("saved")
+    (target / "saved").write_bytes(b"smoke output")
+    assert datadir.fingerprint(source) == before
+    assert (source / "saved").read_bytes() == b"original"
+
+    (source / "outside").symlink_to("../other")
+    with pytest.raises(datadir.DataFolderError):
+        datadir.copy_folder(source, target)
+    assert (target / "saved").read_bytes() == b"smoke output"
+
+
+@pytest.fixture
+def data_release(hub, service_kind, monkeypatch):
+    from provider_hub import datadir, service
+    from provider_hub.state import provider_hub_dir
+
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr(service, "validated_bundle_path", lambda root, path: Path(path))
+    monkeypatch.setattr(service, "validated_interpreter", lambda root, path: Path(path))
+    monkeypatch.setattr(service.PluginEnvironment, "install", lambda self, *args, **kwargs: Path(_python("exampleservice")).parent.parent)
+    active = datadir.release_path(provider_hub_dir(), "exampleservice", "a" * 32)
+    active.mkdir(parents=True)
+    (active / "settings").write_text("from v1")
+    old = service_manifest("exampleservice", "1.0.0", permissions=["data_dir"])
+    new = service_manifest("exampleservice", "1.1.0", permissions=["data_dir"])
+    _seed(exampleservice=_service_row(
+        None, active_version="1.0.0", active_path=_bundle("exampleservice", "1.0.0"), active_data_key=active.name,
+        python_path=_python("exampleservice"), state="active", pending_restart=False, staged_manifest=None,
+        staged_path=None, manifest=old))
+    return service, new, active
+
+
+def test_staging_uses_private_data_and_switch_refreshes_work_done_since_staging(data_release, service_kind, monkeypatch):
+    from provider_hub import datadir, secret_paths
+    from provider_hub.state import load_state, provider_hub_dir
+
+    service, new, old = data_release
+    checked = []
+
+    def smoke(validated, bundle, interpreter, *, data_dir, timeout=None):
+        checked.append((data_dir / "settings").read_text())
+        (data_dir / "settings").write_text("migrated v2")
+
+    monkeypatch.setattr(service_kind, "smoke_test", smoke)
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    assert (old / "settings").read_text() == "from v1"
+    (old / "settings").write_text("v1 kept working")
+
+    assert service.activate_release("exampleservice").activated
+    assert checked == ["from v1", "v1 kept working"]
+    current = load_state()["installations"]["exampleservice"]["active_data_key"]
+    folder = datadir.release_path(provider_hub_dir(), "exampleservice", current)
+    assert (folder / "settings").read_text() == "migrated v2"
+    assert (old / "settings").read_text() == "v1 kept working"
+    history = secret_paths.archived_manifests(provider_hub_dir(), "exampleservice")
+    assert {manifest["version"] for manifest in history} == {"1.0.0", "1.1.0"}
+    datadir.cleanup(provider_hub_dir(), load_state())
+    assert (old / "settings").exists()
+
+    # The rollback smoke test can write to a copy, while the restored release
+    # must run with its original data and the previous release remains kept.
+    assert service.rollback_release("exampleservice").activated
+    assert load_state()["installations"]["exampleservice"]["active_data_key"] == old.name
+    assert (old / "settings").read_text() == "v1 kept working"
+    assert (folder / "settings").read_text() == "migrated v2"
+
+
+def test_busy_activation_stays_staged_and_update_check_retries_it(data_release, service_kind, monkeypatch):
+    import threading
+
+    from provider_hub import datadir
+    from provider_hub.state import load_state
+
+    service, new, old = data_release
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    monkeypatch.setattr(datadir, "QUIESCE_TIMEOUT", 0.03)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def running():
+        with datadir.dispatch("exampleservice"):
+            entered.set()
+            release.wait(2)
+
+    job = threading.Thread(target=running)
+    job.start()
+    try:
+        assert entered.wait(1)
+        result = service.activate_release("exampleservice")
+        assert result.outcome == service.ACTIVATION_WAITING
+        row = load_state()["installations"]["exampleservice"]
+        assert row["active_data_key"] == old.name
+        assert row["staged_version"] == "1.1.0"
+    finally:
+        release.set()
+        job.join(1)
+
+    service.check_updates()
+    assert load_state()["installations"]["exampleservice"]["active_version"] == "1.1.0"
+
+
+@pytest.mark.parametrize("keep", [True, False])
+def test_uninstall_settles_release_data_at_boot(data_release, keep):
+    from provider_hub.state import load_state
+
+    service, _, old = data_release
+    assert (service.remove_installation("exampleservice") if keep
+            else service.remove_installation("exampleservice", keep_data=False))
+    assert old.exists()
+
+    service.activate_staged_installations()
+
+    assert "exampleservice" not in load_state()["installations"]
+    assert not old.exists()
+    kept = old.parent / "kept" / "settings"
+    if keep:
+        assert kept.read_text() == "from v1"
+    else:
+        assert not old.parent.exists()
+
+
+@pytest.mark.parametrize("source", ["official", "another-source"])
+def test_reinstall_only_stages_data_kept_by_its_own_source(data_release, service_kind, source):
+    from provider_hub import datadir
+    from provider_hub.state import load_state, provider_hub_dir
+
+    service, new, _ = data_release
+    assert service.remove_installation("exampleservice")
+    service.activate_staged_installations()
+
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", source,
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    key = load_state()["installations"]["exampleservice"]["staged_data_key"]
+    staged = datadir.release_path(provider_hub_dir(), "exampleservice", key)
+    data = staged / "settings"
+    if source == "official":
+        assert data.read_text() == "from v1"
+    else:
+        assert not data.exists()
+        assert not (staged.parent / "kept").exists()
+
+
+def test_a_portable_copy_keeps_an_internal_nested_link_on_its_own_tree(tmp_path):
+    from provider_hub import datadir
+
+    source, target = tmp_path / "source", tmp_path / "target"
+    (source / "nest").mkdir(parents=True)
+    (source / "value").write_text("previous")
+    (source / "nest" / "reference").symlink_to("../value")
+    datadir.copy_folder(source, target)
+
+    (target / "value").write_text("staged")
+    assert (target / "nest" / "reference").read_text() == "staged"
+    assert (source / "nest" / "reference").read_text() == "previous"
+
+
+def test_pruning_preserves_the_oldest_releases_sign_in_exclusions(hub):
+    from provider_hub import datadir, secret_paths, state_store
+    from provider_hub.state import load_state
+
+    first = _row("alpha", active="1.0.0")
+    first["manifest"]["login"] = {"paths": ["session/v1"]}
+    first["manifest"]["config_schema"] = {
+        "properties": {"region": {"type": "string", "default": "some-value"}},
+    }
+    _seed(alpha=first)
+    _seed(alpha=_row("alpha", active="2.0.0"))
+    _seed(alpha=_row("alpha", active="3.0.0"))
+
+    assert {release.version for release in state_store.list_releases("alpha")} == {"2.0.0", "3.0.0"}
+    [history] = secret_paths.protected_history(load_state(), "alpha")
+    assert ("session", "v1") in datadir.login_paths(history)
+    assert history["config_schema"]["properties"] == {"region": {}}
+
+
+def test_a_pending_restart_rollback_keeps_its_data_in_the_archive(data_release, service_kind, tmp_path):
+    from zipfile import ZipFile
+
+    from provider_hub import datadir
+    from provider_hub.kinds import ATTACH_ON_RESTART
+
+    service, new, old = data_release
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    assert service.activate_release("exampleservice").activated
+    service_kind.attach_policy = ATTACH_ON_RESTART
+
+    assert service.rollback_release("exampleservice").outcome == service.ACTIVATION_WAITING
+    path = tmp_path / "data.zip"
+    with ZipFile(path, "w") as archive:
+        datadir.write_backup(archive)
+    with ZipFile(path) as archive:
+        assert archive.read(f"plugin_data/exampleservice/{old.name}/settings") == b"from v1"
+
+
+def test_kept_legacy_data_is_available_after_a_failed_reinstall(data_release):
+    from provider_hub import datadir
+    from provider_hub.state import provider_hub_dir
+
+    service, _, _ = data_release
+    legacy = datadir.legacy_data_path(provider_hub_dir(), "alpha")
+    legacy.mkdir(parents=True)
+    manifest = {"schema_version": 2, "permissions": ["data_dir"], "kind": "subtitle_provider"}
+    kept = {"source_id": "official", "origin": "catalog", "kind": "subtitle_provider"}
+    failed = {"state": "failed", "source_id": "official", "origin": "catalog"}
+
+    assert service._stage_data_source("alpha", failed, kept, "official", "subtitle_provider",
+                                      "catalog", manifest) == legacy
+
+
+def test_delete_also_clears_the_legacy_provider_data(staged):
+    from provider_hub import datadir, service
+    from provider_hub.detach import wait_idle
+    from provider_hub.state import provider_hub_dir
+
+    legacy = datadir.legacy_data_path(provider_hub_dir(), "alpha")
+    legacy.mkdir(parents=True)
+    (legacy / "settings").write_text("synthetic")
+    service.remove_installation("alpha", keep_data=False)
+    assert wait_idle()
+    assert not legacy.exists()
+
+
+def test_live_uninstall_waits_for_actual_worker_exit_before_moving_data(data_release, service_kind, monkeypatch):
+    from provider_hub import detach, worker
+    from provider_hub.kinds import DETACH_LIVE
+    from provider_hub.state import load_state
+
+    service, _, old = data_release
+    service_kind.detach_policy = DETACH_LIVE
+    client = object()
+    monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [client])
+    monkeypatch.setattr(detach, "stop_stragglers", lambda clients, cut: None)
+    monkeypatch.setattr(worker, "_client_gone", lambda client, budget: False)
+
+    assert service.remove_installation("exampleservice", keep_data=False)
+    assert detach.wait_idle()
+    row = load_state()["installations"]["exampleservice"]
+    assert row["state"] == "removed" and row["pending_restart"]
+    assert (old / "settings").read_text() == "from v1"
+
+
+def test_unreadable_historical_exclusions_omit_that_release_data(data_release, tmp_path):
+    import json
+    from zipfile import ZipFile
+
+    from provider_hub import datadir
+    from provider_hub.state import provider_hub_dir
+
+    _, _, old = data_release
+    folder = provider_hub_dir() / "manifests" / "exampleservice"
+    folder.mkdir(parents=True)
+    (folder / "older.json").write_text("unreadable test metadata")
+    archive_path = tmp_path / "data.zip"
+    with ZipFile(archive_path, "w") as archive:
+        datadir.write_backup(archive)
+    with ZipFile(archive_path) as archive:
+        assert json.loads(archive.read(datadir.OMISSIONS_ARCHIVE)) == [f"exampleservice/{old.name}"]
+        assert not any(name.startswith("plugin_data/") for name in archive.namelist())
+
+
+def test_boot_waits_for_the_previous_workers_before_finishing_uninstall(data_release, service_kind, monkeypatch):
+    from provider_hub import detach, worker
+    from provider_hub.kinds import DETACH_LIVE
+    from provider_hub.state import load_state
+
+    service, _, old = data_release
+    service_kind.detach_policy = DETACH_LIVE
+    client = object()
+    monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [client])
+    monkeypatch.setattr(detach, "stop_stragglers", lambda clients, cut: None)
+    monkeypatch.setattr(worker, "_client_gone", lambda checked, budget: False)
+    assert service.remove_installation("exampleservice", keep_data=False)
+    assert detach.wait_idle()
+    assert old.exists()
+
+    monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [])
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: False)
+    service.activate_staged_installations()
+    assert old.exists()
+    assert load_state()["installations"]["exampleservice"]["pending_restart"]
+
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    service.activate_staged_installations()
+    assert "exampleservice" not in load_state()["installations"]
+    assert not old.exists()
+
+
+def test_legacy_provider_keep_leaves_data_in_the_home_used_on_reinstall(staged, monkeypatch):
+    from provider_hub import datadir, service
+    from provider_hub.detach import wait_idle
+    from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
+    from provider_hub.state import load_state, provider_hub_dir
+
+    root = provider_hub_dir()
+    legacy = datadir.legacy_data_path(root, "alpha")
+    legacy.mkdir(parents=True)
+    (legacy / "settings").write_text("preserved settings")
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    assert service.remove_installation("alpha")
+    assert wait_idle()
+    assert "alpha" not in load_state()["installations"]
+    assert (legacy / "settings").read_text() == "preserved settings"
+
+    monkeypatch.setattr(service.PluginEnvironment, "install",
+                        lambda self, *args, **kwargs: Path(_python("alpha")).parent.parent)
+    kind = get_kind(SUBTITLE_PROVIDER)
+    validation = kind.validate_manifest(_release_manifest("alpha", "1.2.0"), True)
+    service._stage_validated(validation, True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    assert service.activate_staged_installations() == ["alpha"]
+    assert (legacy / "settings").read_text() == "preserved settings"
+
+
+def test_legacy_rollback_refuses_to_replace_a_working_release_without_its_data(staged):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    old_manifest = provider_manifest_v2("alpha", "1.0.0", permissions=["data_dir"])
+    _seed(alpha=_row("alpha", active="1.0.0", manifest=old_manifest))
+    _seed(alpha=_row("alpha", active="2.0.0"))
+
+    assert service.rollback_release("alpha").outcome == service.ACTIVATION_WAITING
+    assert not service.activate_staged_installations()
+    row = load_state()["installations"]["alpha"]
+    assert row["active_version"] == "2.0.0"
+    assert "data folder is missing" in row["last_error"]
+
+
+def test_a_failed_restage_clears_the_stage_it_replaced(data_release, service_kind, monkeypatch):
+    from provider_hub import datadir
+    from provider_hub.state import load_state, provider_hub_dir
+
+    service, new, _ = data_release
+    validation = service_kind.validate_manifest(new, True)
+    def stage(manifest, deadline):
+        return Path(_bundle(manifest.provider_id, manifest.version))
+
+    service._stage_validated(validation, True, "catalog", "official", stage)
+    key = load_state()["installations"]["exampleservice"]["staged_data_key"]
+    folder = datadir.release_path(provider_hub_dir(), "exampleservice", key)
+    assert folder.is_dir()
+
+    def fail(*args, **kwargs):
+        raise ValueError("sample check failed")
+
+    monkeypatch.setattr(service_kind, "smoke_test", fail)
+    with pytest.raises(service.ProviderHubInstallError, match="sample check failed"):
+        service._stage_validated(validation, True, "catalog", "official", stage)
+    assert not folder.exists()
+
+
+def test_boot_activation_waits_until_previous_workers_release_the_active_data(
+        data_release, service_kind, monkeypatch):
+    from provider_hub.kinds import ATTACH_LIVE
+    from provider_hub.state import load_state
+
+    service, new, old = data_release
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    old_file = old / "settings"
+    old_file.write_text("last write from v1")
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: False)
+    assert service.activate_staged_installations() == []
+    row = load_state()["installations"]["exampleservice"]
+    assert row["active_version"] == "1.0.0" and row["staged_version"] == "1.1.0"
+    assert old_file.read_text() == "last write from v1"
+
+    service_kind.attach_policy = ATTACH_LIVE
+    assert not service.activate_release("exampleservice").activated
+    assert load_state()["installations"]["exampleservice"]["active_version"] == "1.0.0"
+
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    assert service.activate_staged_installations() == ["exampleservice"]
+    row = load_state()["installations"]["exampleservice"]
+    assert row["active_version"] == "1.1.0"
+
+
+@pytest.mark.parametrize("keep_data", [True, False])
+def test_uninstall_preserves_the_worker_hold_set_by_boot(data_release, service_kind, monkeypatch, keep_data):
+    from provider_hub import detach
+    from provider_hub.kinds import DETACH_LIVE
+    from provider_hub.state import load_state
+
+    service, new, old = data_release
+    service_kind.detach_policy = DETACH_LIVE
+    service._stage_validated(service_kind.validate_manifest(new, True), True, "catalog", "official",
+                             lambda manifest, deadline: Path(_bundle(manifest.provider_id, manifest.version)))
+    sample = old / "sample"
+    sample.write_text("still in use")
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: False)
+    assert service.activate_staged_installations() == []
+
+    monkeypatch.setattr(detach, "snapshot_workers", lambda provider_id: [])
+    assert service.remove_installation("exampleservice", keep_data=keep_data)
+    assert detach.wait_idle()
+    assert load_state()["installations"]["exampleservice"]["state"] == "removed"
+    assert sample.read_text() == "still in use"
+
+    monkeypatch.setattr(service, "_previous_workers_stopped", lambda: True)
+    service.activate_staged_installations()
+    assert "exampleservice" not in load_state()["installations"]
+    assert not sample.exists()
+    kept = old.parent / "kept" / "sample"
+    if keep_data:
+        assert kept.read_text() == "still in use"
+    else:
+        assert not kept.exists()
+
+
+def test_keep_retry_does_not_replace_the_already_retained_active_data_with_legacy_home(staged, monkeypatch):
+    from provider_hub import datadir, service
+    from provider_hub.state import provider_hub_dir
+
+    root = provider_hub_dir()
+    plugin_id, key = "alpha", "a" * 32
+    active = datadir.release_path(root, plugin_id, key)
+    legacy = datadir.legacy_data_path(root, plugin_id)
+    for folder, value in ((active, "latest data"), (legacy, "old data")):
+        folder.mkdir(parents=True)
+        (folder / "sample").write_text(value)
+    row = _row(plugin_id, active="1.0.0", active_data_key=key)
+    original_remove = datadir.remove
+
+    with monkeypatch.context() as interruption:
+        def fail_on_legacy(path):
+            if path == legacy:
+                raise OSError("simulated legacy cleanup failure")
+            return original_remove(path)
+
+        interruption.setattr(datadir, "remove", fail_on_legacy)
+        with pytest.raises(OSError):
+            service._settle_release_data(plugin_id, row, True)
+    kept = active.parent / "kept"
+    assert not active.exists() and legacy.exists()
+    assert (kept / "sample").read_text() == "latest data"
+
+    service._settle_release_data(plugin_id, row, True)
+    assert not legacy.exists()
+    assert (kept / "sample").read_text() == "latest data"

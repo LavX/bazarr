@@ -1760,6 +1760,73 @@ def test_google_startup_and_worker_reject_a_config_release_before_ranking_it(
     assert definitions.resolve(seed.GOOGLE_PLUGIN_ID).bundle == Path(row["active_path"])
 
 
+def test_seeded_translator_update_waits_for_previous_release_data_writers(
+    tmp_path, monkeypatch, keys, register_seed_translator, hub, google_startup,
+):
+    from provider_hub import datadir, seed
+
+    plugin_id = seed.GOOGLE_PLUGIN_ID
+    root = hub.provider_hub_dir()
+    _no_network(monkeypatch, hub)
+    _build_runtime_snapshot(tmp_path / "old-image", monkeypatch, keys, google_fields={"permissions": ["data_dir"]})
+    start, _ = google_startup
+    assert start()
+    active = hub.load_state()["installations"][plugin_id]
+    old_data = datadir.release_path(root, plugin_id, active["active_data_key"])
+    (old_data / "state.txt").write_text("before the update")
+
+    new_image = _build_runtime_snapshot(tmp_path / "new-image", monkeypatch, keys,
+                                        google_fields={"version": "1.1.0", "permissions": ["data_dir"]})
+    monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: False)
+    assert not start()
+    staged = hub.load_state()["installations"][plugin_id]
+    assert staged["active_version"] == "1.0.0" and staged["staged_version"] == "1.1.0"
+    assert staged["active_data_key"] == old_data.name
+    assert staged["data_worker_cleanup_pending"] is True
+
+    (old_data / "state.txt").write_text("final write")
+    monkeypatch.setattr(hub, "_previous_workers_stopped", lambda: True)
+    assert hub.activate_staged_installations() == [plugin_id]
+    active = hub.load_state()["installations"][plugin_id]
+    assert active["active_version"] == "1.1.0" and Path(active["active_path"]).is_relative_to(new_image)
+    current_data = datadir.release_path(root, plugin_id, active["active_data_key"])
+    assert current_data != old_data
+    assert (current_data / "state.txt").read_text() == "final write"
+
+
+def test_failed_seed_smoke_keeps_the_data_of_a_concurrently_staged_release(
+    tmp_path, monkeypatch, keys, register_seed_translator, hub,
+):
+    from provider_hub import datadir, seed
+    from provider_hub.kinds import get_kind
+
+    _build_runtime_snapshot(tmp_path, monkeypatch, keys, google_fields={"permissions": ["data_dir"]})
+    plugin_id = seed.GOOGLE_PLUGIN_ID
+    root = hub.provider_hub_dir()
+    release = seed.select_release(root, plugin_id)
+    row = hub._staged_installation(release.manifest, None, release.bundle, release.interpreter, True,
+                                   source_id="official")
+    row["staged_data_key"] = "a" * 32
+    kept = datadir.release_path(root, plugin_id, row["staged_data_key"])
+    failed_folders = []
+
+    def fail(*args, data_dir, **kwargs):
+        failed_folders.append(data_dir)
+        kept.mkdir()
+        (kept / "state.txt").write_text("concurrent install")
+        hub.mutate_state(lambda state: state["installations"].update({plugin_id: row}))
+        raise RuntimeError("seed smoke failed")
+
+    monkeypatch.setattr(get_kind(release.manifest.kind), "smoke_test", fail)
+    with pytest.raises(hub.ProviderHubInstallError, match="seed smoke failed"):
+        hub._stage_validated(release.manifest, True, "catalog", "official", None,
+                             ready_release=release, expected_installation=None)
+    failed, = failed_folders
+    assert not failed.exists()
+    assert hub.load_state()["installations"][plugin_id]["staged_data_key"] == kept.name
+    assert (kept / "state.txt").read_text() == "concurrent install"
+
+
 def test_a_failed_probe_refuses_even_a_verified_seed_instead_of_claiming_landlock_is_absent(
     runtime_snapshot, hub, monkeypatch,
 ):

@@ -956,3 +956,39 @@ def test_the_second_scan_loop_honours_the_deadline(tmp_path, instance, started, 
     monkeypatch.undo()
     assert result.truncated and result.sessions == [] and signals.sent == []
     assert all(alive(pid) for pid in seen.values())
+
+
+@pytest.mark.parametrize("namespace_readable", [True, False])
+def test_data_waits_for_a_launcher_without_any_marked_children(tmp_path, monkeypatch, namespace_readable):
+    config = tmp_path / "config"
+    instance = sweep.instance_key(config)
+    launcher = sweep._Proc(pid=321, state="S", ppid=1, pgrp=321, session=321, start="20")
+    marker = f"{instance}:123:10"
+    monkeypatch.setattr(sweep, "_list_pids", lambda: ([launcher.pid], False))
+    monkeypatch.setattr(sweep, "_read_proc", lambda pid: launcher)
+    monkeypatch.setattr(sweep, "_ours", lambda *args: True)
+    monkeypatch.setattr(sweep, "_same_pid_namespace", lambda pid: namespace_readable)
+    monkeypatch.setattr(sweep, "_read_cmdline", lambda pid: [
+        "python", "-I", "-S", "-B", str(spawn.LAUNCHER_PATH), "1", "2", "3", "--owner=" + marker
+    ])
+
+    def hidden(entry):
+        raise PermissionError
+
+    monkeypatch.setattr(sweep, "_bound_marker", hidden)
+    result = sweep.sweep_leftovers(config, verify_writers=True)
+    assert not result.sessions
+    assert result.launchers == {launcher.pid: launcher.start}
+
+    state = ["S"]
+    monkeypatch.setattr(spawn, "_stat_fields", lambda pid: (state[0], launcher.start))
+    monkeypatch.setattr(spawn, "LAUNCHER_CLEANUP_SECONDS", 0)
+    assert not sweep.previous_workers_stopped(config)
+    state[0] = "Z"
+    assert sweep.previous_workers_stopped(config)
+
+
+def test_an_empty_but_unreadable_sweep_does_not_release_plugin_data(tmp_path, monkeypatch):
+    result = sweep.SweepResult(unreadable=1)
+    monkeypatch.setattr(sweep, "sweep_leftovers", lambda config, **kwargs: result)
+    assert not sweep.previous_workers_stopped(tmp_path / "config")

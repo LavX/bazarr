@@ -363,6 +363,7 @@ class HubProxyProvider(Provider):
                     "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
                     "BAZARR_PROVIDER_HUB_MANIFEST": manifest_json,
                     "BAZARR_HOST_CALLS": json.dumps(sorted(host_calls)),
+                    **getattr(self.__class__, "worker_data_env", {}),
                 },
                 provider_id=self.provider_name,
                 release=getattr(self.__class__, "release_key", None),
@@ -562,7 +563,15 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
     if worker_client is not None:
         attrs["worker_client"] = worker_client
     if installation is not None:
+        from . import datadir
+
         root = provider_hub_dir()
+        data_key = getattr(installation, "active_data_key", None)
+        data = (datadir.release_path(root, manifest.provider_id, data_key) if data_key
+                else datadir.legacy_path(root, manifest.provider_id, manifest.raw))
+        if data is not None:
+            attrs["worker_data_env"] = {"BAZARR_PLUGIN_DATA_DIR": str(data)}
+
         if installation.active_path and getattr(installation, "python_path", None):
             from .seed import resolve_paths
 

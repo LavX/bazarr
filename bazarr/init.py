@@ -8,13 +8,14 @@ import rarfile
 
 from dogpile.cache.region import register_backend as register_cache_backend
 
-from app.config import settings, configure_captcha_func, log_startup_notices, write_config
+from app.config import (settings, configure_captcha_func, finish_backup_restore_startup, log_startup_notices,
+                        open_database_after_backup_restore, write_config)
 from app.get_args import args
 from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
 from utilities.package import package_info_path, read_package_info
 from utilities.path_mappings import path_mappings
-from utilities.backup import restore_from_backup
+from utilities.backup import apply_pending_plugin_restore, restore_from_backup
 
 from app.database import init_db
 
@@ -63,10 +64,20 @@ log_cpu_check()
 # What reading the configuration changed in what was stored. It was found before there was a log to say it in.
 log_startup_notices()
 
+# Mark workers started during initialization as well as those started after it.
+try:
+    from provider_hub.sandbox import sweep as sandbox_sweep
+    sandbox_sweep.configure_owner(args.config_dir)
+except Exception:
+    logging.exception("BAZARR cannot mark this run's plugin workers")
+
 # restore backup if required. A restore that leaves the database unfit to run
 # on (pg_restore failing partway, or the restored configuration not going in)
 # stops the start from inside, and so does a dump parked by an earlier failure.
-restore_from_backup()
+if not restore_from_backup():
+    open_database_after_backup_restore()
+    apply_pending_plugin_restore()
+    finish_backup_restore_startup()
 
 
 # change default base_url to ''
