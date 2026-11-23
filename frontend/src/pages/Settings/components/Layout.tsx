@@ -44,6 +44,8 @@ interface Props {
   name: string;
   children: ReactNode;
   fluid?: boolean;
+  saveDisabled?: boolean;
+  canSave?: () => boolean;
 }
 
 // A saved metadata field clears the form at once. The reload after a save
@@ -68,7 +70,13 @@ const isGatedSettingsKey = (key: string) =>
   GATED_SETTINGS_KEYS.has(key.toLowerCase());
 
 const Layout: FunctionComponent<Props> = (props) => {
-  const { children, fluid = false, name } = props;
+  const {
+    children,
+    fluid = false,
+    name,
+    saveDisabled = false,
+    canSave,
+  } = props;
 
   const { data: settings, isLoading, isRefetching } = useSystemSettings();
   const [metadataRefreshFailed, setMetadataRefreshFailed] = useState(false);
@@ -129,12 +137,14 @@ const Layout: FunctionComponent<Props> = (props) => {
 
   const submit = useCallback(
     (values: FormValues) => {
+      if (canSave && !canSave()) return;
       const { settings, hooks } = values;
       if (Object.keys(settings).length > 0 || metadataRefreshFailed) {
         const settingsToSubmit = { ...settings };
         runHooks(hooks, settingsToSubmit);
         LOG("info", "submitting settings", Object.keys(settingsToSubmit));
         const save = () => {
+          if (canSave && !canSave()) return;
           mutate(settingsToSubmit, {
             onSuccess: () => {
               setMetadataRefreshFailed(false);
@@ -154,16 +164,22 @@ const Layout: FunctionComponent<Props> = (props) => {
         }
       }
     },
-    [mutate, metadataRefreshFailed, handleSaveError, runGated],
+    [mutate, metadataRefreshFailed, handleSaveError, runGated, canSave],
   );
 
   const submitAndLeave = useCallback(async () => {
+    if (canSave && !canSave())
+      throw new Error("Settings cannot be saved while status is being checked");
     const { settings, hooks } = form.values;
     if (Object.keys(settings).length > 0 || metadataRefreshFailed) {
       const settingsToSubmit = { ...settings };
       runHooks(hooks, settingsToSubmit);
       LOG("info", "save & leave", Object.keys(settingsToSubmit));
       const save = async () => {
+        if (canSave && !canSave())
+          throw new Error(
+            "Settings cannot be saved while status is being checked",
+          );
         try {
           await mutateAsync(settingsToSubmit);
           setMetadataRefreshFailed(false);
@@ -191,6 +207,7 @@ const Layout: FunctionComponent<Props> = (props) => {
     metadataRefreshFailed,
     handleSaveError,
     runGated,
+    canSave,
   ]);
 
   usePrompt(
@@ -211,6 +228,7 @@ const Layout: FunctionComponent<Props> = (props) => {
   // a field, and the keyboard shortcut below.
   const commitAndSubmit = useCallback(
     (onlyWhenStaged = false) => {
+      if (canSave && !canSave()) return;
       const focused = document.activeElement;
       if (focused instanceof HTMLElement) {
         focused.blur();
@@ -231,7 +249,7 @@ const Layout: FunctionComponent<Props> = (props) => {
         formRef.current.onSubmit(submit)();
       }, 0);
     },
-    [submit],
+    [submit, canSave],
   );
 
   const onFormSubmit = useCallback(
@@ -335,6 +353,7 @@ const Layout: FunctionComponent<Props> = (props) => {
                     size="md"
                     leftSection={<FontAwesomeIcon icon={faFloppyDisk} />}
                     loading={isMutating}
+                    disabled={saveDisabled}
                     aria-label={
                       metadataRefreshFailed && totalStagedCount === 0
                         ? "Retry application refresh"

@@ -24,7 +24,7 @@ import {
   waitFor,
 } from "@/tests";
 import server from "@/tests/mocks/node";
-import { setAuthenticated } from "@/utilities/event";
+import { setAuthenticated, setOnlineStatus } from "@/utilities/event";
 import { WHATS_NEW_SEEN_KEY } from "@/utilities/whatsNew";
 
 // The Translation page belongs to the v2 translation runtime. With the switch
@@ -284,6 +284,63 @@ describe("Translation addresses in the mounted application router", () => {
       ).not.toBeInTheDocument();
     },
   );
+
+  it("blocks saving a mounted draft during reconnect until legacy mode is confirmed", async () => {
+    const submitted: Record<string, FormDataEntryValue>[] = [];
+    showStatus(false);
+    showApplication("/settings/translator");
+    const model = await screen.findByRole("textbox", { name: "Gemini model" });
+    await waitFor(() => expect(model).toHaveValue("gemini-saved"));
+    const user = userEvent.setup();
+    await user.type(model, "-draft");
+    const save = await screen.findByRole("button", {
+      name: "Save 1 pending change",
+    });
+
+    await act(async () => setOnlineStatus(true));
+    await act(async () => setOnlineStatus(false));
+    const requested = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<void>();
+    server.use(
+      http.get("/api/system/status", async () => {
+        requested.resolve();
+        await response.promise;
+        return HttpResponse.json({ data: { translation_runtime_v2: false } });
+      }),
+      http.post("/api/system/settings", async ({ request }) => {
+        submitted.push(
+          Object.fromEntries((await request.formData()).entries()),
+        );
+        return HttpResponse.json({});
+      }),
+    );
+    try {
+      await act(async () => setOnlineStatus(true));
+      await requested.promise;
+      await waitFor(() =>
+        expect(screen.getByTestId("status-fetch")).toHaveTextContent(
+          "fetching",
+        ),
+      );
+      expect(screen.getByRole("textbox", { name: "Gemini model" })).toBe(model);
+      expect(model).toHaveValue("gemini-saved-draft");
+      expect(save).toBeDisabled();
+      fireEvent.click(save);
+      fireEvent.keyDown(document, { key: "s", ctrlKey: true });
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(submitted).toHaveLength(0);
+
+      response.resolve();
+      await waitFor(() => expect(save).toBeEnabled());
+      await user.click(save);
+      await waitFor(() => expect(submitted).toHaveLength(1));
+      expect(submitted[0]["settings-translator-gemini_model"]).toBe(
+        "gemini-saved-draft",
+      );
+    } finally {
+      response.resolve();
+    }
+  });
 
   it.each([false, undefined])(
     "keeps a mounted legacy draft through a background status refresh when v2 is %s",

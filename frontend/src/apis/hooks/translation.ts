@@ -56,6 +56,31 @@ export function useTranslationRouteStatus() {
   return { runtime, isError, error, isFetching, refetch };
 }
 
+export function useLegacyTranslationSaveGuard() {
+  const { data, isSuccess, fetchStatus } = useSystemStatus();
+  const queryClient = useQueryClient();
+  const canSave = () => {
+    const state = queryClient.getQueryState<typeof data>([
+      QueryKeys.System,
+      "status",
+    ]);
+    return (
+      state?.status === "success" &&
+      state.fetchStatus === "idle" &&
+      state.data?.translation_runtime_v2 !== true &&
+      state.data?.translation_runtime_v2_unavailable !== true
+    );
+  };
+  return {
+    disabled:
+      !isSuccess ||
+      fetchStatus !== "idle" ||
+      data?.translation_runtime_v2 === true ||
+      data?.translation_runtime_v2_unavailable === true,
+    canSave,
+  };
+}
+
 /**
  * The page's state. `enabled` is for a caller outside the page that reads it
  * only while the runtime is on: the route does not exist with it off.
