@@ -8,6 +8,9 @@ import sqlalchemy as sa
 from media_source_helpers import ARR_AND_SPORTS_TABLES, table_counts
 import test_media_sources_tools as tools
 from translator_dispatch_helpers import Env
+from subtitles.tools.translate.services.lingarr_translator import LingarrTranslatorService
+
+_LINGARR_TRANSLATE_CONTENT = LingarrTranslatorService._translate_content
 
 world = tools.world
 isolated_jobs = tools.isolated_jobs
@@ -64,6 +67,22 @@ def test_manual_source_api_legacy_translation_publishes_without_an_automatic_pro
     history = legacy_runtime.history(legacy_runtime.last_job())
     assert (history['media_type'], history['media_id'], history['plugin_id'], history['status']) == (
         'source', context.item_id, 'lingarr', 'completed')
+
+
+def test_manual_source_translation_allows_metadata_updates_to_the_same_input(toolbox, legacy_runtime):
+    from media_sources import repository
+
+    context = tools.pipeline._episode(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    response = tools._request(toolbox, context, path, 'translate', language='hu')
+    toolbox.db.execute(sa.update(repository.Items).where(repository.Items.c.id == context.item_id)
+                       .values(title='Updated episode title'))
+
+    tools._run(toolbox, response)
+
+    assert 'Translated Original cue' in Path(context.path).with_suffix('.hu.srt').read_text()
+    (row,) = toolbox.db.execute(sa.select(repository.History)).all()
+    assert (row.item_id, row.action) == (context.item_id, 6)
 
 
 @pytest.mark.parametrize(('changed', 'when'), [
@@ -168,6 +187,7 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
     path = folder / name
     target = video.with_suffix('.hu.srt')
     target.write_text(tools.SRT)
+    captured_path = str(path.resolve())
     original = service.RuntimeTranslatorService._legacy
     translated = []
     loaded = []
@@ -201,8 +221,68 @@ def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
     assert job.kwargs['expected_destination_versions'] == ()
     assert toolbox.jobs._run_job(job)
 
-    assert loaded == [str(path)]
+    assert loaded == [captured_path]
     assert translated == []
+    assert target.read_text() == tools.SRT
+    assert toolbox.db.execute(sa.select(repository.History)).all() == []
+
+
+@pytest.mark.parametrize('change_when', ['before-legacy', 'before-request'])
+def test_source_legacy_translation_rejects_a_new_shared_folder_owner(
+        toolbox, legacy_runtime, monkeypatch, change_when):
+    from app.config import settings
+    from media_sources import repository
+    from media_sources.indexer import source_subtitle_directories
+    from media_source_helpers import add_item, video
+    from subtitles.tools.translate import main
+    from subtitles.tools.translate.runtime import service
+    from subtitles.tools.translate.services import lingarr_translator
+
+    context = tools.pipeline._episode(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    other = video(toolbox.world.root / 'Other' / Path(context.path).name)
+    add_item(toolbox.db, context.source_id, context.library_id, other, kind='episode', group_id=context.group_id, title='Other')
+    target = Path(context.path).with_suffix('.hu.srt')
+    target.write_text(tools.SRT)
+    sent = []
+    monkeypatch.setattr(lingarr_translator.LingarrTranslatorService, '_translate_content',
+                        _LINGARR_TRANSLATE_CONTENT)
+
+    def share_folder():
+        monkeypatch.setattr(settings.general, 'subfolder', 'absolute')
+        monkeypatch.setattr(settings.general, 'subfolder_custom', str(path.parent))
+        assert str(path.parent) in source_subtitle_directories(context.path)
+        assert path.read_text() == tools.SRT
+
+    if change_when == 'before-legacy':
+        original = service.RuntimeTranslatorService._legacy
+
+        def legacy(self, engine, instance):
+            share_folder()
+            return original(self, engine, instance)
+
+        monkeypatch.setattr(service.RuntimeTranslatorService, '_legacy', legacy)
+    else:
+        original_target = lingarr_translator.request_target
+
+        def request_target():
+            share_folder()
+            return original_target()
+
+        monkeypatch.setattr(lingarr_translator, 'request_target', request_target)
+
+    def post(*args, **kwargs):
+        sent.append(kwargs['json'])
+        raise AssertionError('Ambiguous source cues reached the remote translator')
+
+    monkeypatch.setattr(lingarr_translator.requests, 'post', post)
+    job_id = main.translate_subtitles_file(context.path, str(path), 'en', 'hu', False, False, 'episode',
+                                            None, None, None, None, source=context)
+    job = toolbox.jobs._reserve_next_job()
+    assert job.job_id == job_id and job.kwargs['source_tool'] is None
+    assert toolbox.jobs._run_job(job)
+
+    assert sent == []
     assert target.read_text() == tools.SRT
     assert toolbox.db.execute(sa.select(repository.History)).all() == []
 
@@ -229,3 +309,81 @@ def test_automatic_source_legacy_translation_keeps_profile_eligibility(toolbox, 
     assert 'Translated Original cue' in target.read_text()
     (row,) = toolbox.db.execute(sa.select(repository.History)).all()
     assert (row.item_id, row.action, row.subtitles_path) == (context.item_id, 6, str(target))
+
+
+def test_automatic_source_legacy_translation_rechecks_profile_before_request(toolbox, legacy_runtime, monkeypatch):
+    from app.config import settings
+    from app.database import TableLanguagesProfiles, update_profile_id_list
+    from media_sources import repository, translation
+    from subtitles.tools.translate.services import lingarr_translator
+
+    profile = [{'id': 1, 'language': 'en', 'forced': 'False', 'hi': 'False'},
+               {'id': 2, 'language': 'hu', 'forced': 'False', 'hi': 'False', 'translate_from': 'en'}]
+    toolbox.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+    update_profile_id_list.invalidate()
+    monkeypatch.setattr(settings.translator, 'min_source_wait_minutes', 0)
+    context = tools.pipeline._episode(toolbox.world)
+    tools._sidecars(toolbox, context)
+    sent = []
+    original_target = lingarr_translator.request_target
+
+    def request_target():
+        profile[1].pop('translate_from')
+        toolbox.db.execute(sa.update(TableLanguagesProfiles).values(items=json.dumps(profile)))
+        update_profile_id_list.invalidate()
+        return original_target()
+
+    def post(*args, **kwargs):
+        sent.append(kwargs['json'])
+        raise AssertionError('Ineligible source cues reached the remote translator')
+
+    monkeypatch.setattr(lingarr_translator, 'request_target', request_target)
+    monkeypatch.setattr(lingarr_translator.requests, 'post', post)
+    monkeypatch.setattr(lingarr_translator.LingarrTranslatorService, '_translate_content',
+                        _LINGARR_TRANSLATE_CONTENT)
+    assert translation.queue_missing_translations(context) == {'hu'}
+    job = toolbox.jobs._reserve_next_job()
+    assert len(job.kwargs['expected_destination_versions']) == 2
+    assert toolbox.jobs._run_job(job)
+
+    assert sent == []
+    assert not Path(context.path).with_suffix('.hu.srt').exists()
+    assert toolbox.db.execute(sa.select(repository.History)).all() == []
+
+
+def test_source_gemini_translation_uses_captured_cues_without_reopening_the_logical_path(toolbox, monkeypatch):
+    import builtins
+    from io import StringIO
+    from types import SimpleNamespace
+    from app.config import settings
+    from subtitles.tools.translate.services import gemini_translator
+
+    monkeypatch.setattr(settings.translator, 'translator_type', 'gemini')
+    monkeypatch.setattr(settings.translator, 'gemini_keys', ['synthetic-key'])
+    monkeypatch.setattr(gemini_translator, 'jobs_queue', toolbox.jobs)
+    context = tools.pipeline._episode(toolbox.world)
+    path, _ = tools._sidecars(toolbox, context)
+    sent = []
+    reopened = []
+
+    def open_file(file, mode='r', **kwargs):
+        if str(file) == str(path) and mode == 'r':
+            reopened.append(str(file))
+            return StringIO(tools.SRT.replace('Original cue', 'Replacement cue'))
+        return builtins.open(file, mode, **kwargs)
+
+    def request(method, url, **kwargs):
+        sent.append(json.loads(kwargs['data']))
+        text = json.dumps({'candidates': [{'content': {'parts': [{'text': json.dumps([
+            {'index': '0', 'content': 'Translated original cue'}])}]}}]})
+        return SimpleNamespace(text=text, status_code=200, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(gemini_translator, 'open', open_file, raising=False)
+    monkeypatch.setattr(gemini_translator.requests, 'request', request)
+    tools._run(toolbox, tools._request(toolbox, context, path, 'translate', language='hu'))
+
+    assert reopened == []
+    assert len(sent) == 1
+    assert 'Original cue' in json.dumps(sent[0])
+    assert 'Replacement cue' not in json.dumps(sent[0])
+    assert 'Translated original cue' in Path(context.path).with_suffix('.hu.srt').read_text()

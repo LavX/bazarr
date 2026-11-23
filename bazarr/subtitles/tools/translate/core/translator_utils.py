@@ -93,20 +93,79 @@ def translated_destination_path(video_path, to_lang, forced, hi):
     )
 
 
-def load_translation_input(translator, loader):
-    """Read from the captured input when a source tool or the runtime has bound it."""
-    if getattr(translator, 'source', None) is not None:
-        from media_sources.indexer import source_subtitle_directories
+def validate_source_translation_input(translator):
+    """Recheck captured source cues immediately before an external submission."""
+    source = getattr(translator, 'source', None)
+    if source is None:
+        return
+    from media_sources.indexer import SourcePublicationOwnerIndex, source_subtitle_directories
+    from media_sources.translation import automatic_translation_is_current, live_source
+    from utilities.helper import get_subtitle_destination_folder
+    from subtitles.tools.subsync_engines import (SubtitleSourceChanged, sync_output_owner_is_unique,
+                                                 validate_subtitle_versions)
 
-        directory = os.path.normcase(os.path.realpath(os.path.dirname(translator.source_srt_file)))
-        current_directories = {os.path.normcase(os.path.realpath(path))
-                               for path in source_subtitle_directories(translator.video_path)}
-        if directory not in current_directories:
-            raise SourceTranslationChanged('The configured source subtitle folder changed')
+    path = translator.source_srt_file
+    if path != getattr(translator, '_translation_input_path', path):
+        raise SourceTranslationChanged('The selected source subtitle changed')
+    current = live_source(source)
+    if current is None or current.path != translator.video_path:
+        raise SourceTranslationChanged('The source item moved, was removed, or was disabled')
+    folder_policy = settings.general.subfolder, get_subtitle_destination_folder()
+    directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
+    current_directories = {os.path.normcase(os.path.realpath(folder))
+                           for folder in source_subtitle_directories(current.path)}
+    if directory not in current_directories:
+        raise SourceTranslationChanged('The configured source subtitle folder changed')
+    owners = SourcePublicationOwnerIndex()
+    if not sync_output_owner_is_unique(current.path, path, ownership_index=owners):
+        raise SourceTranslationInputAmbiguous('The translation input does not have one media owner')
+    captured = getattr(translator, 'expected_destination_versions', ())
+    if captured and not automatic_translation_is_current(
+            current, path, translator.from_lang, translator.orig_to_lang, translator.forced, translator.hi):
+        raise SourceTranslationChanged('The source profile or translation eligibility changed')
+    snapshots = (getattr(translator, 'expected_runtime_versions', ())
+                 or getattr(translator, '_versions', ())
+                 or getattr(translator, '_translation_input_versions', ()))
+    try:
+        if snapshots:
+            if os.path.realpath(path) != snapshots[0].path:
+                raise SourceTranslationChanged('The source subtitle now resolves to a different file')
+            validate_subtitle_versions(snapshots[:1])
+        validate_subtitle_versions(captured)
+        source_tool = getattr(translator, 'source_tool', None)
+        if source_tool is not None:
+            selected = source_tool.source
+            if (not selected.same_item(source) or selected.source_id != source.source_id
+                    or selected.library_id != source.library_id or selected.path != source.path
+                    or selected.kind != source.kind or source_tool.sidecar.path != path):
+                raise SourceTranslationChanged('The captured source item or subtitle changed')
+            source_tool.check_current(current)
+    except (OSError, SubtitleSourceChanged) as error:
+        raise SourceTranslationChanged('The source subtitle changed before translation') from error
+    if folder_policy != (settings.general.subfolder, get_subtitle_destination_folder()):
+        raise SourceTranslationChanged('The configured source subtitle folder changed')
+
+
+def load_translation_input(translator, loader):
+    """Read the captured physical input after checking its current ownership."""
+    source = getattr(translator, 'source', None)
+    if source is not None:
+        from subtitles.tools.subsync_engines import capture_subtitle_versions
+
+        if not hasattr(translator, '_translation_input_path'):
+            translator._translation_input_path = translator.source_srt_file
+        if not (getattr(translator, 'expected_runtime_versions', ()) or getattr(translator, '_versions', ())
+                or getattr(translator, '_translation_input_versions', ())):
+            translator._translation_input_versions = capture_subtitle_versions(
+                translator.video_path, (os.path.realpath(translator.source_srt_file),))
+        validate_source_translation_input(translator)
     source_tool = getattr(translator, 'source_tool', None)
     if source_tool is None:
         path = translator.source_srt_file
         runtime_versions = getattr(translator, 'expected_runtime_versions', ())
+        if source is not None:
+            runtime_versions = (runtime_versions or getattr(translator, '_versions', ())
+                                or getattr(translator, '_translation_input_versions', ()))
         if runtime_versions:
             captured_input = runtime_versions[0].path
             if os.path.realpath(path) != captured_input:

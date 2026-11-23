@@ -93,6 +93,8 @@ class JobSpec:
     progress: Callable[[int, int, str], None] | None = None
     # Runs the in-core service for an engine that has no worker: ``legacy(engine, instance) -> LegacyResult``.
     legacy: Callable[[Any, Any], "LegacyResult"] | None = None
+    # Revalidates a library source after the plugin worker has been admitted.
+    before_send: Callable[[], None] | None = None
 
 
 @dataclass
@@ -300,6 +302,7 @@ class Dispatcher:
     # ------------------------------------------------------------------------------------------ the entry
     def run(self, spec: JobSpec) -> DispatchOutcome:
         from app.jobs_queue import JobCancelled
+        from ..core.translator_utils import SourceTranslationChanged
 
         jobs = TranslationJobs(self.session, clock=self.clock)
         history = HistoryStore(self.session, clock=self.clock)
@@ -317,6 +320,10 @@ class Dispatcher:
         digest = line_digest(spec.lines)
         try:
             return self._run_chain(spec, chain, state, jobs, history, ledger, digest)
+        except SourceTranslationChanged as changed:
+            jobs.cancel(state.job_id, fail.SOURCE_CHANGED, str(changed))
+            self._finish_history(history, state, "cancelled", fail.SOURCE_CHANGED, str(changed))
+            raise
         except JobCancelled:
             jobs.cancel(state.job_id)
             self._finish_history(history, state, "cancelled")
@@ -737,7 +744,8 @@ class Dispatcher:
                     logger.debug("A translation progress callback failed", exc_info=True)
 
         try:
-            handle = self.workers.submit(serving_id, request, secrets, context=context, on_progress=on_progress)
+            handle = self.workers.submit(serving_id, request, secrets, context=context, on_progress=on_progress,
+                                         **({"before_send": spec.before_send} if spec.before_send is not None else {}))
         except JobCancelled:
             raise
         except BaseException as error:

@@ -398,6 +398,7 @@ def test_manual_source_translation_runs_through_v2_runtime(toolbox, monkeypatch)
     from app import database
     from app.config import settings
     from media_sources import repository
+    from media_sources.indexer import SourcePublicationOwnerIndex
     from subtitles.tools.translate import main, runtime
     from subtitles.tools.translate.runtime import gate, service
     from translator_dispatch_helpers import Env
@@ -411,6 +412,8 @@ def test_manual_source_translation_runs_through_v2_runtime(toolbox, monkeypatch)
     assert runtime.runtime_v2_enabled()
     monkeypatch.setattr(main.TranslatorFactory, 'create_translator',
                         Mock(side_effect=AssertionError('Expected the configured runtime')))
+    load_owners = Mock(side_effect=AssertionError('A sidecar beside its video needs only local ownership'))
+    monkeypatch.setattr(SourcePublicationOwnerIndex, '_load_owners', load_owners)
     env = Env(toolbox.db, toolbox.world.tmp_path)
     try:
         env.ai_engine()
@@ -428,3 +431,86 @@ def test_manual_source_translation_runs_through_v2_runtime(toolbox, monkeypatch)
     assert '[hu] Original cue' in target.read_text()
     (row,) = toolbox.db.execute(sa.select(repository.History)).all()
     assert (row.action, row.item_id, row.subtitles_path) == (6, context.item_id, str(target))
+    load_owners.assert_not_called()
+
+
+@pytest.mark.parametrize('change_during', ['budget_wait', 'worker_admission', 'worker_admission_edit'])
+def test_source_translation_revalidates_input_before_worker_send(toolbox, monkeypatch, change_during):
+    from app import database
+    from app.config import settings
+    from media_sources import repository
+    from media_sources.indexer import index_item
+    from subtitles.tools.translate import runtime
+    from subtitles.tools.translate.runtime import gate, service
+    from subtitles.tools.translate.runtime.jobs import TranslationJobs
+    from subtitles.tools.translate.runtime.usage import CostLimits, UsageLedger
+    from translator_dispatch_helpers import Env, usd
+
+    context = pipeline._movie(toolbox.world)
+    video = Path(context.path)
+    folder = video.parent / 'Subs'
+    folder.mkdir()
+    path = folder / video.with_suffix('.en.srt').name
+    path.write_text(SRT)
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', folder.name)
+    assert index_item(context.item_id) is not None
+    monkeypatch.setattr(settings.translator, 'runtime_v2', True)
+    monkeypatch.setattr(database, 'engine', toolbox.db.get_bind())
+    monkeypatch.setattr(runtime, '_tables_present', False)
+    monkeypatch.setattr(runtime, '_absent_until', 0.0)
+    env = Env(toolbox.db, toolbox.world.tmp_path)
+    try:
+        instance = env.ai_engine()
+        ledger = UsageLedger(env.session, clock=env.clock)
+        monkeypatch.setattr(gate, 'translation_gate', lambda: gate.evaluate(env.store, env.holds, env.workers))
+        moved = toolbox.world.tmp_path / 'other-subtitles'
+        moved.mkdir()
+
+        def change_input():
+            if change_during == 'worker_admission_edit':
+                path.write_text(SRT.replace('Original cue', 'A newer cue'))
+            else:
+                monkeypatch.setattr(settings.general, 'subfolder', 'absolute')
+                monkeypatch.setattr(settings.general, 'subfolder_custom', str(moved))
+
+        changed = []
+        if change_during == 'budget_wait':
+            env.limits = CostLimits(month_cap=usd(1), translation_limit=1)
+            jobs = TranslationJobs(env.session, clock=env.clock)
+            other = jobs.request('/other.en.srt', 'hu').job_id
+            jobs.start(other, source_digest='other', engine_instance_id=instance.id, settings_revision=1)
+            ledger.reserve_job_budget(str(other), env.limits)
+
+            def release_budget(_seconds):
+                change_input()
+                changed.append(True)
+                ledger.release_job(str(other))
+
+            monkeypatch.setattr(service, 'Dispatcher', lambda: env.dispatcher(sleep=release_budget))
+        else:
+            lease = env.pool._lease
+
+            def admit_worker(key):
+                slot = lease(key)
+                change_input()
+                changed.append(True)
+                return slot
+
+            monkeypatch.setattr(env.pool, '_lease', admit_worker)
+            monkeypatch.setattr(service, 'Dispatcher', env.dispatcher)
+
+        _run(toolbox, _request(toolbox, context, path, 'translate', language='hu'))
+        assert changed == [True]
+        assert env.requests() == []
+        job = env.last_job()
+        assert (job.state, job.error_class) == ('cancelled', 'source_changed')
+        history = env.history(job)
+        assert (history['status'], history['error_class']) == ('cancelled', 'source_changed')
+        assert ledger.job_hold(str(job.id)) == 0
+    finally:
+        env.close()
+    target_name = video.with_suffix('.hu.srt').name
+    assert not (folder / target_name).exists()
+    assert not (moved / target_name).exists()
+    assert toolbox.db.execute(sa.select(repository.History)).all() == []

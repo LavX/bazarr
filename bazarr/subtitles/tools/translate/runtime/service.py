@@ -31,7 +31,8 @@ from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, Subtitl
                                              validate_subtitle_versions)
 
 from ..core.translator_utils import (load_translation_input, add_translator_info, create_process_result, get_title,
-                                     record_source_translation, require_source_translation, translation_write_kwargs)
+                                     record_source_translation, require_source_translation, translation_write_kwargs,
+                                     validate_source_translation_input)
 from .failure import MESSAGES
 from .dispatch import DispatchFailed, Dispatcher, JobSpec, LegacyDeclined, LegacyResult
 from .jobs import line_digest, target_key
@@ -145,6 +146,10 @@ class RuntimeTranslatorService:
             jobs_queue.update_job_progress(job_id=self._job_id, progress_value=done, progress_max=total,
                                            progress_message=message)
 
+    def _check_source_before_send(self):
+        self._check()
+        validate_source_translation_input(self)
+
     def _legacy(self, engine, instance):
         from ..services.translator_factory import TranslatorFactory
 
@@ -208,7 +213,8 @@ class RuntimeTranslatorService:
                                  self.arr_instance_id, self.sports_operation,
                                  **({"source": self.source} if self.source is not None else {})),
             history_media=history_media,
-            pin_from_job=True, check_cancel=self._check, progress=self._progress, legacy=self._legacy)
+            pin_from_job=True, check_cancel=self._check, progress=self._progress, legacy=self._legacy,
+            before_send=self._check_source_before_send if self.source is not None else None)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:

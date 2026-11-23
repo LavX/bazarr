@@ -28,7 +28,10 @@ async function openSourceEditor(multipleEngines = false) {
       }),
     ),
     http.get("/api/system/languages", () =>
-      HttpResponse.json([{ code2: "de", name: "German", enabled: true }]),
+      HttpResponse.json([
+        { code2: "de", name: "German", enabled: true },
+        { code2: "hu", name: "Hungarian", enabled: true },
+      ]),
     ),
     http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
     http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
@@ -114,9 +117,11 @@ async function switchLanguage(
   from: "en" | "hu",
   to: "en" | "hu",
 ) {
-  await user.click(screen.getByRole("button", { name: `${from} [srt] ▾` }));
+  const fromName = from === "hu" ? "Hungarian" : from;
+  const toName = to === "hu" ? "Hungarian" : to;
+  await user.click(screen.getByRole("button", { name: `${fromName} [srt] ▾` }));
   await user.click(
-    await screen.findByRole("menuitem", { name: `${to} [srt]` }),
+    await screen.findByRole("menuitem", { name: `${toName} [srt]` }),
   );
   await screen.findAllByText(`Original ${to}`);
 }
@@ -134,7 +139,7 @@ it("offers only existing subtitles in the source language menu", async () => {
     screen.queryByRole("link", { name: "Local film" }),
   ).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: /^en \[srt\]/ }));
-  await screen.findByRole("menuitem", { name: "hu [srt]" });
+  await screen.findByRole("menuitem", { name: "Hungarian [srt]" });
   expect(screen.queryByText("Create new")).not.toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: "German (de)" })).toBeNull();
 });
