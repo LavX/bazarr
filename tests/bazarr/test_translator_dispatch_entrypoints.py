@@ -583,7 +583,9 @@ def test_history_database_failure_keeps_a_dispatch_retry_recoverable(
     assert env.history(row)["status"] == "completed"
 
 
-def test_an_editor_planner_cannot_release_another_queue_jobs_claim(env, monkeypatch, editor_runtime_queue):
+@pytest.mark.parametrize("planner_failure", ["unexpected", "gate-closed"])
+def test_an_editor_planner_cannot_release_another_queue_jobs_claim(
+        env, monkeypatch, editor_runtime_queue, planner_failure):
     from threading import Event, Thread, current_thread
 
     from subtitles.tools.translate import editor
@@ -603,6 +605,8 @@ def test_an_editor_planner_cannot_release_another_queue_jobs_claim(env, monkeypa
         if current_thread() is failing_worker:
             entered.set()
             assert claimed.wait(8)
+            if planner_failure == "gate-closed":
+                raise GateClosed("the selected engine is unavailable", "engine_missing")
             raise RuntimeError("could not read the selected engine")
         return original_plan(dispatcher, spec)
 
@@ -638,6 +642,82 @@ def test_an_editor_planner_cannot_release_another_queue_jobs_claim(env, monkeypa
     assert winning_job.status == "completed"
     assert editor.editor_translation_state(winning_id)["lines"] == [{"position": 9, "line": "[hu] Hello"}]
     assert env.last_job().state == "completed"
+
+
+@pytest.mark.parametrize("attachment", ["own", "competing"])
+def test_native_dispatch_preserves_its_claim_when_attachment_arrives_late(
+        env, media, monkeypatch, editor_runtime_queue, attachment):
+    from threading import Event, Thread
+
+    from subtitles.tools.translate import main
+    from subtitles.tools.translate.runtime import service
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    queue = editor_runtime_queue
+    monkeypatch.setattr(main, "jobs_queue", queue)
+    monkeypatch.setattr(service, "jobs_queue", queue)
+    monkeypatch.setattr(main, "_runtime_active", lambda: True)
+    monkeypatch.setattr(main, "get_title", lambda *args, **kwargs: "Film")
+    monkeypatch.setattr(main, "record_failed_translation", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.subtitles.subtitles.postprocess_subtitles", lambda *args, **kwargs: None)
+    monkeypatch.setattr("subtitles.tools.combine.main.try_combine_for_video", lambda **kwargs: None)
+    attach = main._runtime_attach
+    attachments = []
+    monkeypatch.setattr(main, "_runtime_attach", lambda *args, **kwargs: attachments.append((args, kwargs)))
+
+    first = _request(main, video_path=str(media.video), source_srt_file=str(media.source))
+    if attachment == "competing":
+        second = _request(main, video_path=str(media.video), source_srt_file=str(media.source),
+                          metadata={"title": "A second copy of the same request"})
+        assert first != second
+    job = queue._reserve_next_job()
+    assert job.job_id == first and env.last_job().queue_job_id is None
+    ready, release = Event(), Event()
+    original_plan = Dispatcher._plan
+
+    def plan(dispatcher, spec):
+        ready.set()
+        assert release.wait(8)
+        return original_plan(dispatcher, spec)
+
+    def fail_owner(dispatcher, *args, **kwargs):
+        ready.set()
+        assert release.wait(8)
+        raise RuntimeError("the running owner failed")
+
+    if attachment == "own":
+        monkeypatch.setattr(Dispatcher, "_plan", plan)
+    else:
+        monkeypatch.setattr(Dispatcher, "_run_plugin", fail_owner)
+
+    def execute():
+        try:
+            queue._run_job(job)
+        finally:
+            env.session.remove()
+
+    worker = Thread(target=execute, daemon=True)
+    worker.start()
+    try:
+        assert ready.wait(8)
+        args, kwargs = attachments[-1]
+        attach(*args, **kwargs)
+        row = env.last_job()
+        assert row.queue_job_id == first
+        assert row.state == ("queued" if attachment == "own" else "running")
+    finally:
+        release.set()
+        worker.join(8)
+
+    if attachment == "own":
+        assert job.status == "completed"
+        assert "[fr] One" in media.dest.read_text()
+        assert len(media.logged) == 1 and media.logged[0]["action"] == 6
+        assert env.last_job().state == "completed"
+    else:
+        assert job.status == "failed"
+        assert (env.last_job().state, env.last_job().queue_job_id) == ("awaiting_retry", None)
+        assert not media.dest.exists()
 
 
 def test_lingarr_publishes_through_its_own_service_and_the_runtime_writes_nothing(env, media, monkeypatch):

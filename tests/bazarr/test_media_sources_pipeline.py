@@ -2725,7 +2725,7 @@ def test_runtime_queues_a_new_source_translation_for_a_replacement_recording(
             from subtitles.tools.translate.runtime.history import HistoryStore
 
             history = HistoryStore(world.db)
-            state = SimpleNamespace(job_id=older_id, ledger_id=str(older_id), claimed=True, queue_job_id=older.job_id)
+            state = SimpleNamespace(job_id=older_id, ledger_id=str(older_id), owner=("running", older.job_id))
             history.open_job(state.ledger_id, source_language="en", target_language="hu")
 
             def retry_while_replacing(translator, job_id):

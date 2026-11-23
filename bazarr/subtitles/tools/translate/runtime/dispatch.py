@@ -276,6 +276,10 @@ class _Run:
     declines: list[str] = field(default_factory=list)
     notices: list[Notice] = field(default_factory=list)
 
+    @property
+    def owner(self) -> tuple[str, int | None]:
+        return (RUNNING if self.claimed else QUEUED, self.queue_job_id)
+
 
 class Dispatcher:
     def __init__(self, session=None, *, store: TranslatorStore | None = None, workers: WorkerPort | None = None,
@@ -316,16 +320,17 @@ class Dispatcher:
         history = HistoryStore(self.session, clock=self.clock)
         ledger = UsageLedger(self.session, clock=self.clock)
         row = self._ensure_job(jobs, spec)
-        if row is None or (spec.queue_job_id is not None and row.queue_job_id not in (None, spec.queue_job_id)):
+        if row is None or row.queue_job_id not in (None, spec.queue_job_id):
             return DispatchOutcome("skipped")
         _maintain_when_due(self.session, self.clock, self.monotonic, self.limits)
         state = _Run(row.id, str(row.id), DeadlineWatch(clock=self.monotonic, **self.deadlines),
-                     queue_job_id=row.queue_job_id)
+                     queue_job_id=spec.queue_job_id)
         try:
             try:
                 chain, state.notices = self._plan(spec)
             except GateClosed as closed:
-                self._end_gate_closed(jobs, history, spec, state, closed)
+                if not self._end_gate_closed(jobs, history, spec, state, closed):
+                    return DispatchOutcome("skipped", job_id=state.job_id)
                 raise
             return self._run_chain(spec, chain, state, jobs, history, ledger, line_digest(spec.lines))
         except SourceTranslationChanged as changed:
@@ -333,8 +338,8 @@ class Dispatcher:
             self._finish_history(history, state, "cancelled", fail.SOURCE_CHANGED, str(changed))
             raise
         except JobCancelled:
-            jobs.cancel(state.job_id)
-            self._finish_history(history, state, "cancelled")
+            if jobs.cancel(state.job_id, owner=state.owner):
+                self._finish_history(history, state, "cancelled")
             raise
         except (DispatchFailed, Declined, GateClosed):
             raise  # already recorded
@@ -357,6 +362,8 @@ class Dispatcher:
         """The job's record, ready to start. None when another job already runs it or it has ended."""
         row = jobs.active_for(spec.source_key, spec.target_key)
         picked = spec.pinned_connection_id
+        if row is not None and row.queue_job_id not in (None, spec.queue_job_id):
+            return None
         if row is not None and picked is not None and row.pinned_connection_id != picked \
                 and row.state in (QUEUED, AWAITING_RETRY):
             # A new pick replaces the one the job has: the old job ends superseded and its checkpoints go.
@@ -452,13 +459,12 @@ class Dispatcher:
             if position == 0:
                 if not jobs.start(state.job_id, source_digest=digest, engine_instance_id=instance.id,
                                   settings_revision=instance.revision, release_digest=release,
-                                  expected_queue_job_id=state.queue_job_id, queue_job_id=spec.queue_job_id):
+                                  owner=state.owner):
                     return DispatchOutcome("skipped", job_id=state.job_id)
                 state.claimed = True
-                if spec.queue_job_id is not None:
-                    state.queue_job_id = spec.queue_job_id
             elif not jobs.switch_engine(state.job_id, engine_instance_id=instance.id,
-                                        settings_revision=instance.revision, release_digest=release):
+                                        settings_revision=instance.revision, release_digest=release,
+                                        owner=state.owner):
                 return DispatchOutcome("skipped", job_id=state.job_id)
             plugin_id = legacy.plugin_id if legacy is not None else instance.plugin_id
             history.open_job(
@@ -473,10 +479,12 @@ class Dispatcher:
             except EngineDeclined as declined:
                 state.declines.append(declined.reason)
                 taken_over = chain[position + 1].instance.id if position + 1 < len(chain) else None
+                if taken_over is None and not jobs.fail(state.job_id, fail.DECLINED, "; ".join(state.declines),
+                                                       owner=state.owner):
+                    return DispatchOutcome("skipped", job_id=state.job_id)
                 history.note_declined(state.ledger_id, instance_id=chain[0].instance.id,
                                       reason="; ".join(state.declines), taken_over_by=taken_over)
                 if taken_over is None:
-                    jobs.fail(state.job_id, fail.DECLINED, "; ".join(state.declines))
                     history.finish_job(state.ledger_id, "declined", error_class=fail.DECLINED,
                                        error_detail="; ".join(state.declines))
                     raise Declined(state.declines) from None
@@ -495,8 +503,8 @@ class Dispatcher:
 
     # ------------------------------------------------------------------------------------------ endings
     def _complete(self, jobs, history, state, output) -> None:
-        jobs.complete(state.job_id)
-        self._finish_history(history, state, "partial" if output.partial_error else "completed")
+        if jobs.complete(state.job_id, owner=state.owner):
+            self._finish_history(history, state, "partial" if output.partial_error else "completed")
 
     def _publication_failed(self, jobs, history, state, error: BaseException) -> str:
         """The subtitle could not be written. The job awaits a retry with its batches when the write failed or the
@@ -508,16 +516,17 @@ class Dispatcher:
         from ..core.translator_utils import EmptySourceTranslation
 
         if isinstance(error, JobCancelled):
-            jobs.cancel(state.job_id)
-            self._finish_history(history, state, "cancelled")
+            if jobs.cancel(state.job_id, owner=state.owner):
+                self._finish_history(history, state, "cancelled")
             return "cancelled"
         if isinstance(error, EmptySourceTranslation):
             self._end_failed(jobs, history, state, AttemptFailure(error.reason, str(error)))
             return "failed"
         if isinstance(error, SubtitleDestinationChanged):
-            jobs.fail(state.job_id, fail.DESTINATION_CHANGED, fail.MESSAGES[fail.DESTINATION_CHANGED])
-            self._finish_history(history, state, "failed", fail.DESTINATION_CHANGED,
-                                 fail.MESSAGES[fail.DESTINATION_CHANGED])
+            if jobs.fail(state.job_id, fail.DESTINATION_CHANGED, fail.MESSAGES[fail.DESTINATION_CHANGED],
+                         owner=state.owner):
+                self._finish_history(history, state, "failed", fail.DESTINATION_CHANGED,
+                                     fail.MESSAGES[fail.DESTINATION_CHANGED])
             return "failed"
         error_class = fail.SOURCE_CHANGED if isinstance(error, SubtitleSourceChanged) else fail.PUBLISH_FAILED
         self._await_retry(jobs, history, state, error_class, fail.MESSAGES[error_class],
@@ -528,8 +537,7 @@ class Dispatcher:
         # A replacement can cancel the retry as soon as the job state is visible.
         with ledger_transaction(self.session):
             recorded = jobs.await_retry(state.job_id, error_class, message, retry_at=retry_at,
-                                        expected_state=RUNNING if state.claimed else QUEUED,
-                                        expected_queue_job_id=state.queue_job_id)
+                                        owner=state.owner)
             if recorded:
                 try:
                     # History failure must not roll back the job's retry.
@@ -547,12 +555,15 @@ class Dispatcher:
         except Exception:
             logger.warning("A translation history row could not be finished", exc_info=True)
 
-    def _end_gate_closed(self, jobs, history, spec, state, closed: GateClosed) -> None:
-        jobs.cancel(state.job_id, fail.GATE_CLOSED, closed.reason)
-        history.open_job(state.ledger_id, **{key: value for key, value in spec.history_media.items()
-                                             if value is not None},
-                         source_language=spec.source_language, target_language=spec.target_language)
-        history.finish_job(state.ledger_id, "declined", error_class=fail.GATE_CLOSED, error_detail=closed.reason)
+    def _end_gate_closed(self, jobs, history, spec, state, closed: GateClosed) -> bool:
+        with ledger_transaction(self.session):
+            if not jobs.cancel(state.job_id, fail.GATE_CLOSED, closed.reason, owner=state.owner):
+                return False
+            history.open_job(state.ledger_id, **{key: value for key, value in spec.history_media.items()
+                                                 if value is not None},
+                             source_language=spec.source_language, target_language=spec.target_language)
+            history.finish_job(state.ledger_id, "declined", error_class=fail.GATE_CLOSED, error_detail=closed.reason)
+        return True
 
     def _end_failed(self, jobs, history, state, failure: AttemptFailure) -> DispatchFailed:
         retry_later = failure.retries_later or failure.error_class == INACTIVITY_TIMEOUT
@@ -561,8 +572,7 @@ class Dispatcher:
         if retry_later:
             retry_at = self._retry_at(failure)
             self._await_retry(jobs, history, state, failure.error_class, message, retry_at=retry_at)
-        else:
-            jobs.fail(state.job_id, failure.error_class, message)
+        elif jobs.fail(state.job_id, failure.error_class, message, owner=state.owner):
             self._finish_history(history, state, "failed", failure.error_class, message)
         return DispatchFailed(failure.error_class, message, retry_later=retry_later, retry_at=retry_at)
 
