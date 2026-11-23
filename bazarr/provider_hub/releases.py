@@ -237,6 +237,13 @@ def matches_catalog_registration(data: dict[str, Any], source_id: str | None, re
     return recorded == current or (recorded is None and current == _LEGACY_CATALOG_REGISTRATION)
 
 
+def is_unchecked_legacy_catalog(source: Any) -> bool:
+    """A source row reset before old hosts cleared its cached entries."""
+    return (isinstance(source, dict) and not source.get("official") and not source.get("registration")
+            and "last_checked_at" in source and source["last_checked_at"] is None
+            and not source.get("resolved_commit"))
+
+
 def legacy_restage_sources_current(data: dict[str, Any], previous_source: str | None,
                                    selected_source: str | None) -> bool:
     """Both registrations used by the historical writer remain, including the official source."""
@@ -301,6 +308,7 @@ def _legacy_catalog_attested(data, source_id, plugin_id, version, manifest) -> b
     url = source.get("url") if isinstance(source, dict) and not source.get("registration") else None
     manifest_source = manifest.get("source") if isinstance(manifest, dict) else None
     return (isinstance(url, str) and bool(url) and isinstance(manifest_source, dict)
+            and not is_unchecked_legacy_catalog(source)
             and _legacy_manifest_provenance_matches(data, source_id, source, plugin_id, version, manifest))
 
 
