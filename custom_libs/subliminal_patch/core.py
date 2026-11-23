@@ -2263,6 +2263,12 @@ def external_subtitle_base(stem):
         lambda match: "" if match.group(1).lower() in FULL_LANGUAGE_LIST else match.group(0), stem)
 
 
+def is_vobsub_pair(filename, regular_names):
+    """A .sub with a companion .idx is a bitmap subtitle."""
+    stem, extension = os.path.splitext(filename.lower())
+    return extension == ".sub" and stem + ".idx" in regular_names
+
+
 def search_external_subtitles_in_directory(path, languages=None, only_one=False, match_strictness="strict"):
     dirpath, filename = os.path.split(path)
     dirpath = dirpath or '.'
@@ -2288,7 +2294,7 @@ def search_external_subtitles_in_directory(path, languages=None, only_one=False,
         if not INCLUDE_EXOTIC_SUBS and p_ext not in (".srt", ".ass", ".ssa", ".vtt"):
             continue
 
-        if p_ext.lower() == ".sub" and f"{p_root}.idx".lower() in names:
+        if is_vobsub_pair(p, names):
             continue
 
         if p_root.lower() == fn_no_ext_lower:
