@@ -150,6 +150,8 @@ def source_availability(sources, session=None):
     retained = repository.retained_activity_by_kind(session)
     by_kind = {kind: {'browsable': False, 'searchable': False, 'retained': retained[kind]}
                for kind in repository.CONTENT_KINDS}
+    if retained['removed_sports']:
+        by_kind['sports']['removed'] = True
     for source in sources:
         for library in source['libraries']:
             kind = by_kind[library['content_kind']]

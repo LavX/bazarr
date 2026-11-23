@@ -39,7 +39,7 @@ const BlacklistSportsView: FunctionComponent = () => {
   const { activity, sourceActivity, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
   const { owner, includeSources, sourceKeys, labels } =
-    useSportsActivityScope();
+    useSportsActivityScope(true);
   const eventId = params.get("event_id")
     ? Number(params.get("event_id"))
     : undefined;
@@ -47,7 +47,7 @@ const BlacklistSportsView: FunctionComponent = () => {
   const [language, setLanguage] = useState("");
   const [provider, setProvider] = useState("");
   const [confirmClear, setConfirmClear] = useState<
-    number | MediaSourceKey | null
+    number | MediaSourceKey | "all" | null
   >(null);
   // The bulk clear needs its own pending flag. `remove` is one shared mutation
   // object, so keying the Remove All button off remove.isPending made it spin
@@ -207,6 +207,7 @@ const BlacklistSportsView: FunctionComponent = () => {
           actionLoading={clearing}
           onAction={setConfirmClear}
           onSourceAction={setConfirmClear}
+          onAllSourcesAction={() => setConfirmClear("all")}
         />
         {removedNotice && (
           <Text size="sm">
@@ -228,7 +229,9 @@ const BlacklistSportsView: FunctionComponent = () => {
       >
         <Stack>
           <Text>
-            {`Allow every excluded release for this ${typeof confirmClear === "string" ? "source" : "instance"} again? `}
+            {confirmClear === "all"
+              ? "Allow every excluded release across all sports libraries again? "
+              : `Allow every excluded release for this ${typeof confirmClear === "string" ? "source" : "instance"} again? `}
             Removing an exclusion does not bring the subtitle back; it makes
             that release eligible for a future search.
           </Text>
@@ -244,9 +247,11 @@ const BlacklistSportsView: FunctionComponent = () => {
                 setClearing(true);
                 setRemovedNotice(false);
                 remove.mutate(
-                  typeof confirmClear === "string"
-                    ? { origin: "source", sourceKey: confirmClear }
-                    : { owner: confirmClear },
+                  confirmClear === "all"
+                    ? { origin: "source", all: true }
+                    : typeof confirmClear === "string"
+                      ? { origin: "source", sourceKey: confirmClear }
+                      : { owner: confirmClear },
                   {
                     onSuccess: () => {
                       setConfirmClear(null);

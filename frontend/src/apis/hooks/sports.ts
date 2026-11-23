@@ -1,4 +1,5 @@
 import { useSearchParams } from "react-router";
+import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { usePaginationQuery } from "@/apis/queries/hooks";
@@ -36,10 +37,11 @@ export function useSportsAvailability() {
   };
 }
 
-export function useSportsActivityScope() {
+export function useSportsActivityScope(includeRemovedSources = false) {
   const [params] = useSearchParams();
   const scope = useSourceFilter("sports", "sportarr", {
     includeDisabledSources: true,
+    includeRemovedSources,
     clearOnChange: ["event_id", "league"],
   });
   const legacy = params.get("instance");
@@ -504,19 +506,28 @@ export function useRemoveSportsExclusion() {
       scope:
         | { owner: number; id?: number }
         | { origin: "source"; id: number; removalKey: string }
-        | { origin: "source"; sourceKey: MediaSourceKey },
+        | { origin: "source"; sourceKey: MediaSourceKey }
+        | { origin: "source"; all: true },
     ) =>
       "origin" in scope
         ? sports.removeSourceExclusion(scope)
         : sports.removeExclusion(scope.owner, scope.id),
-    onSuccess: refresh,
+    onSuccess: () => {
+      void refresh();
+    },
     onError: (error, scope) => {
       if (
         "removalKey" in scope &&
         isAxiosError(error) &&
         error.response?.status === 409
-      )
+      ) {
+        showNotification({
+          color: "yellow",
+          message:
+            "This exclusion changed or was removed. Check the list before trying again.",
+        });
         return refresh();
+      }
     },
   });
 }

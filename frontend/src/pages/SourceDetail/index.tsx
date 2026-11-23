@@ -136,16 +136,17 @@ export function SourceMovieActions({ item }: { item: SourceItem }) {
   const search = useSourceSearch();
   const scan = useSourceScan();
   const available = useSourceOwnerAvailable(item);
-  const canManage =
-    (item.effective_profile_id !== undefined
+  const filesAvailable = available && !item.server_missing;
+  const profile =
+    item.effective_profile_id !== undefined
       ? item.effective_profile_id
-      : item.profile_id) !== null &&
-    !item.server_missing &&
-    available &&
-    !item.arr_shadow;
+      : item.profile_id;
   const ready =
-    canManage && ["identified", "parsed"].includes(item.identity_state);
-  const manualReady = item.kind === "sports_event" ? canManage : ready;
+    filesAvailable &&
+    !item.arr_shadow &&
+    profile !== null &&
+    ["identified", "parsed"].includes(item.identity_state);
+  const manualReady = item.kind === "sports_event" ? filesAvailable : ready;
   return (
     <Stack gap="xs">
       <Group gap="xs">
@@ -319,7 +320,10 @@ export function SourceSubtitleTable({ item }: { item: SourceItem }) {
       {
         id: "actions",
         cell: ({ row }) =>
-          row.original.path && !item.arr_shadow && available ? (
+          row.original.path &&
+          available &&
+          !item.server_missing &&
+          (!item.arr_shadow || item.kind === "sports_event") ? (
             <SourceSubtitleMenu item={item} subtitle={row.original} />
           ) : null,
       },
@@ -396,19 +400,26 @@ function SourceLeagueEvents({ id }: { id: number }) {
         header: "Event",
         accessorKey: "title",
         cell: ({ row: { original: event } }) => (
-          <Anchor
-            component="button"
-            className="table-primary"
-            onClick={() =>
-              modals.openContextModal(
-                SourceSportsEventModal,
-                { item: event },
-                { title: event.title },
-              )
-            }
-          >
-            {event.title}
-          </Anchor>
+          <Group gap="xs">
+            <Anchor
+              component="button"
+              className="table-primary"
+              onClick={() =>
+                modals.openContextModal(
+                  SourceSportsEventModal,
+                  { item: event },
+                  { title: event.title },
+                )
+              }
+            >
+              {event.title}
+            </Anchor>
+            {event.arr_shadow && (
+              <Badge color="gray">
+                Managed by {event.shadowed_by || "Sportarr"}
+              </Badge>
+            )}
+          </Group>
         ),
       },
       { header: "Round", accessorKey: "episode" },

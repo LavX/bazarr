@@ -190,13 +190,13 @@ const LeagueRowActions: FunctionComponent<{ league: SportsLeagueRow }> = ({
 const SportarrLeagues: FunctionComponent<{ instances: ArrInstance[] }> = ({
   instances,
 }) => {
-  const { data: audioCatalogue } = useAudioLanguages();
+  const { sourceBrowsable } = useSportsAvailability();
+  const { data: audioCatalogue } = useAudioLanguages(true, sourceBrowsable);
   const nameToCode = useMemo(
     () => new Map(audioCatalogue?.map(({ name, code2 }) => [name, code2])),
     [audioCatalogue],
   );
   const modals = useModals();
-  const { sourceBrowsable } = useSportsAvailability();
   const ownerFilter = useSourceFilter("sports", "sportarr");
   const getInstanceValue = useCallback(
     (item: SportsLeagueRow) =>

@@ -30,6 +30,7 @@ import {
   useSportsAvailability,
   useSportsHistoryPagination,
 } from "@/apis/hooks/sports";
+import sports from "@/apis/raw/sports";
 import { HistoryIcon, SportsJobFeedback } from "@/components/bazarr";
 import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
@@ -37,11 +38,7 @@ import SourceBadge from "@/components/bazarr/SourceBadge";
 import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
-import {
-  sourceDetailApi,
-  sourceError,
-  useSourceWrite,
-} from "@/pages/SourceDetail/api";
+import { sourceError, useSourceWrite } from "@/pages/SourceDetail/api";
 import HistoryView from "@/pages/views/HistoryView";
 import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
 
@@ -85,7 +82,7 @@ const SportsHistoryView: FunctionComponent = () => {
     useSportsAvailability();
   const [params] = useSearchParams();
   const { owner, includeSources, sourceKeys, labels } =
-    useSportsActivityScope();
+    useSportsActivityScope(true);
   const eventId = params.get("event_id")
     ? Number(params.get("event_id"))
     : undefined;
@@ -247,7 +244,6 @@ const SportsHistoryView: FunctionComponent = () => {
             (original.origin === "source" &&
               (!original.source_id ||
                 !original.source_item_id ||
-                !original.subtitles_path ||
                 !original.language_key))
           ) {
             return null;
@@ -343,7 +339,7 @@ const SportsHistoryView: FunctionComponent = () => {
         <Stack>
           <Text>
             {pending?.origin === "source"
-              ? "Delete the currently indexed subtitle at this path and exclude this provider release for source sports events?"
+              ? "Exclude this provider release for source sports events? The current subtitle file will stay on disk."
               : EXCLUDE_PROMPT}
           </Text>
           {excludeSource.isError && (
@@ -360,24 +356,22 @@ const SportsHistoryView: FunctionComponent = () => {
                 if (!pending) return;
                 if (pending.origin === "source") {
                   const {
-                    source_item_id: id,
+                    source_item_id: itemId,
                     source_id: sourceId,
-                    subtitles_path: path,
-                    language_key: key,
+                    language_key: language,
                     provider,
                     subs_id: releaseId,
                   } = pending;
-                  if (id && sourceId && path && key && provider && releaseId) {
+                  if (itemId && sourceId && language && provider && releaseId) {
                     excludeSource.mutate(
                       () =>
-                        sourceDetailApi.excludeSubtitle(
-                          id,
-                          sourceId,
-                          path,
-                          key,
+                        sports.excludeSourceHistory(pending.id, {
+                          source_id: sourceId,
+                          source_item_id: itemId,
+                          language,
                           provider,
-                          releaseId,
-                        ),
+                          subs_id: releaseId,
+                        }),
                       {
                         onSuccess: () => setPending(null),
                       },

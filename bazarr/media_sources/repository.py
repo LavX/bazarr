@@ -502,6 +502,8 @@ def retained_activity_by_kind(target=None):
     checks = [sa.or_(sa.exists().where(History.c.item_kind == item_kind),
                      sa.exists().where(Blacklist.c.item_kind == item_kind)).label(content_kind)
               for content_kind, item_kind in by_kind.items()]
+    checks.append(sa.or_(*(sa.exists().where(table.c.item_kind == 'sports_event', table.c.source_id.is_(None))
+                           for table in (History, Blacklist))).label('removed_sports'))
     return _target(target).execute(sa.select(*checks)).mappings().one()
 
 

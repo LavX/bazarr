@@ -190,7 +190,21 @@ class SportsBlacklistHistory(Resource):
     @authenticate
     def post(self, history_id):
         try:
-            owner = _owner(_body().get("arr_instance_id"))
+            payload = _body()
+            if request.args.get('origin') == 'source':
+                if request.args.get('sources') != '1' or 'arr_instance_id' in payload:
+                    raise ValueError('Source history exclusions require sources=1 and a source history row.')
+                source_id, item_id = (payload.get(key) for key in ('source_id', 'source_item_id'))
+                if any(type(value) is not int or not 0 < value <= 2_147_483_647 for value in (source_id, item_id)):
+                    raise ValueError('A source ID and source item ID are required.')
+                provider, subs_id, language = (payload.get(key) for key in ('provider', 'subs_id', 'language'))
+                if not all(isinstance(value, str) and value.strip() for value in (provider, subs_id, language)):
+                    raise ValueError('A provider, subtitle ID and language are required.')
+                if not sports_activity.exclude_history_release(database, history_id, source_id, item_id,
+                                                               provider, subs_id, language):
+                    return {'message': 'This history entry changed or was removed. Refresh the list and try again.'}, 409
+                return '', 204
+            owner = _owner(payload.get("arr_instance_id"))
             row = database.get(TableHistorySports, history_id, populate_existing=True)
             if (
                 row is None

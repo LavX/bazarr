@@ -188,6 +188,44 @@ it("groups source events by season and uses the source item action", async () =>
   );
 });
 
+it("keeps manual Sports tools available for an unprofiled, shadowed recording", async () => {
+  const user = userEvent.setup();
+  const event = {
+    ...movie,
+    id: 60,
+    kind: "sports_event",
+    title: "Unprofiled recording",
+    identity_state: "unmatched",
+    profile_id: null,
+    effective_profile_id: null,
+    arr_shadow: true,
+    shadowed_by: "Race archive",
+  };
+  server.use(
+    http.get("/api/sources/groups/7", () =>
+      HttpResponse.json({ ...movie, kind: "league", title: "Folder league" }),
+    ),
+    http.get("/api/sources/groups/7/items", () =>
+      HttpResponse.json({ data: [event], total: 1 }),
+    ),
+    http.get("/api/sources/items/60", () => HttpResponse.json(event)),
+  );
+  openPage("sports");
+  expect(await screen.findByText("Managed by Race archive")).toBeVisible();
+  await user.click(await screen.findByRole("button", { name: event.title }));
+  const dialog = within(
+    await screen.findByRole("dialog", { name: event.title }),
+  );
+  expect(dialog.getByRole("button", { name: "Search" })).toBeDisabled();
+  expect(dialog.getByRole("button", { name: "Manual Search" })).toBeEnabled();
+  expect(dialog.getByRole("button", { name: "Upload" })).toBeEnabled();
+  expect(dialog.getByRole("button", { name: "Actions" })).toBeEnabled();
+  await user.click(dialog.getByRole("button", { name: "Manual Search" }));
+  expect(
+    await screen.findByRole("dialog", { name: "Search Subtitles" }),
+  ).toBeVisible();
+});
+
 it("reads the source movie despite a colliding Arr cache and normalizes its stored subtitle rows", async () => {
   queryClient.setQueryData([QueryKeys.Movies, 7], { title: "Wrong Arr movie" });
   queryClient.setQueryData(sourceDetailKeys.item(7, "episode"), {

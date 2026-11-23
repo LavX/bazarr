@@ -85,7 +85,11 @@ function isSourceKey(value: string | null): value is MediaSourceKey {
 export function useSourceFilter(
   kind: SourceContentKind,
   arr: "sonarr" | "radarr" | "sportarr",
-  { includeDisabledSources = false, clearOnChange = [] as string[] } = {},
+  {
+    includeDisabledSources = false,
+    includeRemovedSources = false,
+    clearOnChange = [] as string[],
+  } = {},
 ) {
   const [params, setParams] = useSearchParams();
   const arrLabels = useArrInstanceLabels(arr);
@@ -100,6 +104,8 @@ export function useSourceFilter(
         : [],
     [data, isEnabled, kind],
   );
+  const removed =
+    includeRemovedSources && data?.availability?.[kind]?.removed === true;
   const enabledArr = settings?.general?.[`use_${arr}`] === true;
   const arrConfigured =
     enabledArr &&
@@ -127,9 +133,11 @@ export function useSourceFilter(
         names.set(`source:${source.id}`, source.name);
       }
     }
+    if (removed) names.set("source:removed", "Removed sources");
     return names;
   }, [
     enabledArr,
+    removed,
     arrLabels.enabledOptions,
     sources,
     kind,
@@ -151,8 +159,11 @@ export function useSourceFilter(
     // On a folder-only page, send the configured source keys so that legacy Arr rows stay out.
     return arrConfigured
       ? []
-      : sources.map<MediaSourceKey>((source) => `source:${source.id}`);
-  }, [arrConfigured, selected, sources]);
+      : [
+          ...sources.map<MediaSourceKey>((source) => `source:${source.id}`),
+          ...(removed ? ["source:removed" as const] : []),
+        ];
+  }, [arrConfigured, removed, selected, sources]);
 
   return {
     includeSources: true,

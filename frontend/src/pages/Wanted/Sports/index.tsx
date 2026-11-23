@@ -7,7 +7,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { useAudioLanguages } from "@/apis/hooks/languages";
+import { useAudioLanguages, useLanguages } from "@/apis/hooks/languages";
 import {
   sportsActivityLink,
   sportsRowOwner,
@@ -100,7 +100,7 @@ const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
 };
 
 const WantedSportsView: FunctionComponent = () => {
-  const { activity, arrEnabled, sourceActivity, isLoading } =
+  const { activity, arrEnabled, sourceActivity, sourceSearchable, isLoading } =
     useSportsAvailability();
   const scope = useSportsActivityScope();
   const { owner, includeSources, sourceKeys, labels } = scope;
@@ -128,11 +128,25 @@ const WantedSportsView: FunctionComponent = () => {
   // the Audio column speak code2, so both directions are mapped through this
   // catalogue: names become the codes the rows carry, and the column turns
   // those back into readable names.
-  const { data: audioLangs = [] } = useAudioLanguages(arrEnabled);
+  const { data: audioLangs = [] } = useAudioLanguages(
+    arrEnabled || sourceSearchable,
+    sourceSearchable,
+  );
+  const { data: languages } = useLanguages(false, sourceSearchable);
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
     [audioLangs],
   );
+  const missingLangOptions = useMemo(() => {
+    if (!sourceSearchable) return langOptions;
+    const options = new Map(
+      langOptions.map((option) => [option.value, option.label]),
+    );
+    for (const language of languages ?? []) {
+      if (language.enabled) options.set(language.code2, language.name);
+    }
+    return [...options].map(([value, label]) => ({ value, label }));
+  }, [languages, langOptions, sourceSearchable]);
   const nameToCode = useMemo(() => {
     const map = new Map<string, string>();
     for (const lang of audioLangs) map.set(lang.name, lang.code2);
@@ -389,7 +403,7 @@ const WantedSportsView: FunctionComponent = () => {
       missingLanguage={missingLanguage ?? undefined}
       onMissingLanguageChange={setMissingLanguage}
       langOptions={langOptions}
-      missingLangOptions={langOptions}
+      missingLangOptions={missingLangOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       searchAll={searchAll}
       scanAll={scanAll}

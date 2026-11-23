@@ -58,19 +58,29 @@ def list_leagues(session, args, scope, *, arr_instance_id, start, length):
         session, length=-1, row_filter=leagues.id.in_(arr_ids))['data']} if arr_ids else {}
     source_data = {}
     if source_ids:
+        events = items.join(groups, sa.and_(groups.c.id == items.c.group_id, groups.c.source_id == items.c.source_id,
+                                            groups.c.library_id == items.c.library_id))
+        in_page = sa.and_(items.c.kind == _KIND, items.c.group_id.in_(source_ids))
         counts = sa.select(items.c.group_id, sa.func.count().label('files'), sa.func.count(sa.case(
-            (items.c.missing_subtitles.notin_(('', '[]')), 1))).label('missing')).where(
-            items.c.kind == _KIND, items.c.group_id.in_(source_ids)).group_by(items.c.group_id).subquery()
+            (items.c.missing_subtitles.notin_(('', '[]')), 1))).label('missing')).select_from(events).where(
+            in_page).group_by(items.c.group_id).subquery()
         details = sa.select(groups.c.id, groups.c.title, groups.c.poster, groups.c.group_key, groups.c.monitored,
                             sources.c.name.label('source_name'), sources.c.kind.label('source_kind'),
                             sa.func.coalesce(groups.c.profile_id, libraries.c.profile_id).label('profile_id'),
                             counts.c.files, counts.c.missing).join(libraries, libraries.c.id == groups.c.library_id
                             ).join(sources, sources.c.id == groups.c.source_id
                             ).outerjoin(counts, counts.c.group_id == groups.c.id).where(groups.c.id.in_(source_ids))
+        audio_names = {}
+        for group_id, raw in session.execute(sa.select(items.c.group_id, items.c.audio_language).select_from(events)
+                                              .where(in_page, items.c.audio_language.is_not(None),
+                                                     items.c.audio_language != '[]').distinct()):
+            audio_names.setdefault(group_id, set()).update(
+                name for name in library.parse_stored_list(raw) if isinstance(name, str) and name)
         source_data = {row.id: {
             'id': row.id, 'title': row.title, 'poster': row.poster, 'source_name': row.source_name,
             'source_kind': row.source_kind, 'path': row.group_key if row.source_kind == 'folder' else None,
-            'monitored': bool(row.monitored), 'profileId': row.profile_id, 'tags': [], 'audio_language': [],
+            'monitored': bool(row.monitored), 'profileId': row.profile_id, 'tags': [],
+            'audio_language': sorted(audio_names.get(row.id, ())),
             'eventCount': row.files or 0, 'eventFileCount': row.files or 0, 'missingLanguageCount': row.missing or 0,
         } for row in session.execute(details)}
     return _mixed_response(page, total, arr_data, source_data)
@@ -203,6 +213,38 @@ def list_activity(session, kind, args, scope, **filters):
     return _mixed_response(page, total, arr_data, source_data)
 
 
+def exclude_history_release(session, history_id, source_id, item_id, provider, subs_id, language):
+    """Exclude the historical release without assuming its subtitle path still names that artifact."""
+    table = repository.History
+    with source_transaction(session) as connection:
+        # The source and item locks precede the history lock used by writers and cascades.
+        if repository.get_source(source_id, connection, lock_key=True) is None:
+            return False
+        item = repository.get_item(item_id, connection, for_update=True)
+        if item is None or item.source_id != source_id or item.kind != _KIND:
+            return False
+        row = connection.execute(sa.select(table).where(
+            table.c.id == history_id, table.c.source_id == source_id, table.c.item_id == item_id,
+            table.c.item_kind == _KIND, table.c.action.in_((1, 2, 3)),
+            table.c.provider == provider, table.c.subs_id == subs_id, table.c.language == language,
+        ).with_for_update()).first()
+        if row is None:
+            return False
+        blacklist = repository.Blacklist
+        found = connection.scalar(sa.select(sa.exists().where(
+            blacklist.c.item_kind == _KIND, blacklist.c.source_id == row.source_id,
+            blacklist.c.provider == row.provider, blacklist.c.subs_id == row.subs_id,
+            blacklist.c.language == row.language)))
+        if not found:
+            repository.insert_blacklist(
+                connection, item_kind=_KIND, source_id=row.source_id, item_id=row.item_id,
+                provider=row.provider, subs_id=row.subs_id, language=row.language, video_path=row.video_path,
+                item_title=row.item_title, group_title=row.group_title, source_name=row.source_name)
+    event_stream(type='sports')
+    event_stream(type='sports-blacklist')
+    return True
+
+
 def clear_blacklist(session, scope):
     source = repository.Blacklist
     removed = 0
@@ -211,7 +253,9 @@ def clear_blacklist(session, scope):
             removed = connection.execute(sa.delete(source).where(
                 source.c.item_kind == _KIND, scope.source(source.c.source_id),
             )).rowcount
-        if not scope.keys and not removed:
+        libraries = repository.Libraries.c
+        if not scope.keys and not removed and not connection.scalar(
+                sa.select(sa.exists().where(libraries.content_kind == 'sports'))):
             raise ValueError('arr_instance_id is required and must be a positive integer')
         if settings.general.use_sportarr and scope.includes('arr'):
             enabled = sa.select(TableArrInstances.id).where(

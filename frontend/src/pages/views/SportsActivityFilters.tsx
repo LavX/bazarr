@@ -20,6 +20,7 @@ interface Props {
   actionDisabled?: boolean;
   onAction?: (owner: number) => void;
   onSourceAction?: (source: MediaSourceKey) => void;
+  onAllSourcesAction?: () => void;
   actionLoading?: boolean;
 }
 
@@ -39,20 +40,26 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
   actionDisabled,
   onAction,
   onSourceAction,
+  onAllSourcesAction,
   actionLoading,
 }) => {
   const { instances, sourceActivity } = useSportsAvailability();
-  const scope = useSportsActivityScope();
+  const scope = useSportsActivityScope(true);
   const [params, setParams] = useSearchParams();
   const owner = scope.owner;
   const eventId = params.get("event_id");
   // With exactly one Sportarr there is nothing to choose, so its actions run
   // against it without making the user pick it first.
   const source = scope.selected?.startsWith("source:") ? scope.selected : null;
+  const allSources =
+    sourceActivity &&
+    owner === undefined &&
+    scope.selected === null &&
+    onAllSourcesAction;
   const selectedOwner = source
     ? undefined
     : owner === undefined
-      ? instances.length === 1
+      ? !sourceActivity && instances.length === 1
         ? instances[0].id
         : undefined
       : instances.find((instance) => instance.id === owner)?.id;
@@ -66,6 +73,8 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
           onChange={scope.onChange}
           includeSources={sourceActivity}
           showSingleSource={sourceActivity}
+          showSingleOwner={!sourceActivity && instances.length > 0}
+          showLabel={!sourceActivity}
         />
         <TextInput
           label="Language"
@@ -84,24 +93,28 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
             color={actionColor}
             variant={actionColor ? "light" : undefined}
             disabled={
-              !(selectedOwner || (source && onSourceAction)) || actionDisabled
+              !(selectedOwner || allSources || (source && onSourceAction)) ||
+              actionDisabled
             }
             loading={actionLoading}
-            onClick={() =>
-              source
-                ? onSourceAction?.(source)
-                : selectedOwner && onAction?.(selectedOwner)
-            }
+            onClick={() => {
+              if (allSources) allSources();
+              else if (source) onSourceAction?.(source);
+              else if (selectedOwner) onAction?.(selectedOwner);
+            }}
           >
             {actionLabel}
           </Button>
         )}
       </Group>
-      {actionLabel && !selectedOwner && !(source && onSourceAction) && (
-        <Text size="sm" c="dimmed">
-          Select an instance to run an action for its library.
-        </Text>
-      )}
+      {actionLabel &&
+        !selectedOwner &&
+        !allSources &&
+        !(source && onSourceAction) && (
+          <Text size="sm" c="dimmed">
+            Select an instance to run an action for its library.
+          </Text>
+        )}
       {eventId && (
         <Group>
           <Text size="sm">Showing this event&apos;s records.</Text>

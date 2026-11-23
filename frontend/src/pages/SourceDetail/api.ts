@@ -45,6 +45,7 @@ export interface SourceItem extends Omit<SourceGroup, "kind"> {
   subtitles: Subtitle[];
   missing_subtitles: Language.Info[];
   arr_shadow: boolean;
+  shadowed_by?: string | null;
   audio_language?: (string | null)[];
   server_missing?: boolean;
 }
@@ -254,26 +255,6 @@ class SourceDetailApi extends BaseApi {
       language: subtitle.code2,
       hi: subtitle.hi,
       forced: subtitle.forced,
-    });
-  }
-
-  excludeSubtitle(
-    id: number,
-    sourceId: number,
-    path: string,
-    key: string,
-    provider: string,
-    releaseId: string,
-  ) {
-    const language = languageInfo(key);
-    return this.post(`/items/${id}/blacklist`, {
-      source_id: sourceId,
-      subtitles_path: path,
-      language: language.code2,
-      hi: language.hi,
-      forced: language.forced,
-      provider,
-      subs_id: releaseId,
     });
   }
 }

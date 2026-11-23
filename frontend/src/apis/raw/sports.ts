@@ -227,6 +227,22 @@ class SportsApi extends BaseApi {
       })
     ).data;
   }
+  excludeSourceHistory(
+    historyId: number,
+    row: {
+      source_id: number;
+      source_item_id: number;
+      provider: string;
+      subs_id: string;
+      language: string;
+    },
+  ) {
+    return this.postRaw(`/history/${historyId}/blacklist`, row, {
+      sources: 1,
+      origin: "source",
+    });
+  }
+
   async removeExclusion(owner: number, id?: number) {
     return (
       await this.delete<{ removed: boolean | number }>(
@@ -237,7 +253,10 @@ class SportsApi extends BaseApi {
     ).data;
   }
   async removeSourceExclusion(
-    scope: { id: number; removalKey: string } | { sourceKey: MediaSourceKey },
+    scope:
+      | { id: number; removalKey: string }
+      | { sourceKey: MediaSourceKey }
+      | { all: true },
   ) {
     if ("sourceKey" in scope && !scope.sourceKey.startsWith("source:"))
       throw new Error("Select a source first");
@@ -252,7 +271,11 @@ class SportsApi extends BaseApi {
               origin: "source",
               source_blacklist_key: scope.removalKey,
             }
-          : { sources: 1, "source_key[]": [scope.sourceKey] },
+          : {
+              sources: 1,
+              "source_key[]":
+                "sourceKey" in scope ? [scope.sourceKey] : undefined,
+            },
       )
     ).data;
   }
