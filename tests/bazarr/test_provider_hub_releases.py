@@ -1762,11 +1762,12 @@ def test_pre_key_provider_stage_reserves_data_identity_before_retry(hub, monkeyp
     assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,))[0] == active
 
 
+@pytest.mark.parametrize("legacy_registry", [False, True])
 @pytest.mark.parametrize(("bundle_valid", "detach"),
                          [(True, None), (False, None), (True, "removed"), (True, "unbound")],
                          ids=["verified", "changed-bytes", "removed-catalogs", "unbound"])
 def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(
-        hub, monkeypatch, bundle_valid, detach):
+        hub, monkeypatch, bundle_valid, detach, legacy_registry):
     from plugin_platform_helpers import provider_manifest_v2
     from provider_hub import datadir, releases, service, state_store
     from provider_hub.kinds import SUBTITLE_PROVIDER, get_kind
@@ -1837,6 +1838,23 @@ def test_reserving_data_does_not_activate_a_stage_replaced_by_another_catalogue(
     assert not row.get("staged_data_key")
     restaged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
     assert restaged.id == original.id and restaged.data_key is None
+    if legacy_registry:
+        def remove_registrations(state):
+            for catalog in ("catalog-a", "catalog-b"):
+                state["catalog_sources"][catalog].pop("registration")
+
+        mutate_state(remove_registrations)
+        with state_store.write_transaction(state_store.engine()) as connection:
+            rows = releases.read_rows(connection, plugin_id=plugin_id)
+            for saved in rows:
+                fields = [field for field in json.loads(saved["fields"])
+                          if not field.startswith("catalog_registration:")]
+                connection.execute(sa.update(releases.releases_table).where(
+                    releases.releases_table.c.id == saved["id"]).values(fields=json.dumps(fields)))
+        state_store._ready.clear()
+        restaged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+        assert restaged.id == original.id
+        assert restaged.catalog_registration == releases.LEGACY_RESTAGED_REGISTRATION
     previous, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     if detach == "removed":
         assert service.remove_catalog_source("catalog-a")
@@ -2099,6 +2117,26 @@ def test_replacing_catalog_url_keeps_cached_releases_out_of_the_new_registration
     assert (datadir.release_path(provider_hub_dir(), plugin_id, active.data_key) / "settings").read_text() == (
         "new catalog settings")
     assert (original_data / "settings").read_text() == "private catalog A data"
+
+
+def test_queued_catalog_update_stages_the_verified_registrations_data(catalog_data_owner, monkeypatch):
+    from provider_hub import datadir, jobs, releases, state_store
+    from provider_hub.state import provider_hub_dir
+
+    _, _, _, original_data, _ = catalog_data_owner
+    plugin_id = "examplehub"
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    queued = []
+    monkeypatch.setattr(jobs, "_enqueue", lambda _label, action, fields: queued.append((action, fields)) or 42)
+    monkeypatch.setattr(jobs, "_checkpoint", lambda _job_id: lambda _message: None)
+    assert jobs.queue_update(plugin_id) == 42
+    (action, fields), = queued
+    assert getattr(jobs, action)(**fields)["staged_version"] == "1.1.0"
+    staged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    assert (staged.source_id, staged.catalog_registration) == (active.source_id, active.catalog_registration)
+    copied = datadir.release_path(provider_hub_dir(), plugin_id, staged.data_key)
+    assert copied != original_data
+    assert (copied / "settings").read_text() == (original_data / "settings").read_text() == "private catalog A data"
 
 
 @pytest.mark.parametrize("already_active", [False, True])

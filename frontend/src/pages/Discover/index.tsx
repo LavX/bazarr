@@ -34,8 +34,7 @@ import { useAppTitle, useEnabledStatus } from "@/apis/hooks/site";
 import { useDiscover } from "@/contexts/Discover";
 import {
   discoverPageKey,
-  recentEpisodeMismatch,
-  searchSelection,
+  discoverSearchEligibility,
 } from "@/contexts/discoverState";
 import DigitalReleases from "./DigitalReleases";
 import DiscoverSelect from "./DiscoverSelect";
@@ -108,7 +107,9 @@ export default function Discover() {
         (key) => route.getAll(key).length > 1,
       ) ||
       (source !== "omdb"
-        ? !/^[1-9]\d{0,12}$/.test(linkedId)
+        ? !(
+            source === "local" ? /^(source:)?[1-9]\d{0,12}$/ : /^[1-9]\d{0,12}$/
+          ).test(linkedId)
         : !linkedId || linkedId.length > 256) ||
       (linkedSeason !== null &&
         (kind !== "show" || !/^(0|[1-9]\d{0,3})$/.test(linkedSeason))) ||
@@ -185,13 +186,14 @@ export default function Discover() {
           : {
               mediaType: "movie",
               imdbId: "",
+              copyTmdbId: undefined,
               title: undefined,
               year: undefined,
               query: "",
               showId: undefined,
               showTvdbId: undefined,
               episodeIdentity: undefined,
-              manualEntry: false,
+              manualEntry: undefined,
               manualConfirmed: false,
               season: "",
               episode: "",
@@ -199,7 +201,10 @@ export default function Discover() {
       });
       return;
     }
-    const id = source === "omdb" ? linkedId : Number(linkedId);
+    const id =
+      source === "omdb" || linkedId.startsWith("source:")
+        ? linkedId
+        : Number(linkedId);
     const season = linkedSeason === null ? null : Number(linkedSeason);
     const episode = linkedEpisode === null ? null : Number(linkedEpisode);
     const sameTitle =
@@ -243,12 +248,13 @@ export default function Discover() {
       mediaType: kind === "show" ? "episode" : "movie",
       showId: kind === "show" && source === "tmdb" ? Number(id) : undefined,
       imdbId: sameTitle ? state.draft.imdbId : "",
+      copyTmdbId: sameTitle ? state.draft.copyTmdbId : undefined,
       title: sameTitle ? state.draft.title : undefined,
       year: sameTitle ? state.draft.year : undefined,
       showTvdbId: sameTitle ? state.draft.showTvdbId : undefined,
       episodeIdentity: undefined,
       manualConfirmed: false,
-      manualEntry: source !== "tmdb",
+      manualEntry: source === "tmdb" ? undefined : "numbers",
       season: "",
       episode: "",
     });
@@ -491,8 +497,8 @@ export default function Discover() {
   ]);
   const searching = state.status === "searching";
   const searched = snapshot !== null || state.status === "failed";
-  const recentMismatch = recentEpisodeMismatch(state);
-  const canSearch = searchSelection(draft) !== null && !recentMismatch;
+  const { recentMismatch, selection } = discoverSearchEligibility(state);
+  const canSearch = selection !== null;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!searching && canSearch) void findSubtitles(searched);
@@ -933,10 +939,11 @@ export default function Discover() {
                               value === "episode" ? "episode" : "movie",
                             title: undefined,
                             year: undefined,
+                            copyTmdbId: undefined,
                             showId: undefined,
                             episodeIdentity: undefined,
                             manualConfirmed: false,
-                            manualEntry: true,
+                            manualEntry: "numbers",
                             season: "",
                             episode: "",
                           });
@@ -979,12 +986,13 @@ export default function Discover() {
                       onChange={(event) => {
                         updateDraft({
                           imdbId: event.currentTarget.value,
+                          copyTmdbId: undefined,
                           title: undefined,
                           year: undefined,
                           showId: undefined,
                           episodeIdentity: undefined,
                           manualConfirmed: false,
-                          manualEntry: true,
+                          manualEntry: "numbers",
                           season: "",
                           episode: "",
                         });
@@ -1044,11 +1052,16 @@ export default function Discover() {
                   <Checkbox
                     mt="md"
                     className={styles.manualConfirmation}
-                    label="I confirm this series IMDb ID and the manual season and episode numbers"
+                    label={
+                      !draft.imdbId && draft.copyTmdbId
+                        ? "I confirm the manual season and episode numbers"
+                        : "I confirm this series IMDb ID and the manual season and episode numbers"
+                    }
                     description="Manual recovery. Source numbering and episode identity remain unverified."
                     checked={Boolean(draft.manualConfirmed)}
                     disabled={
-                      !/^tt\d{7,10}$/.test(draft.imdbId) ||
+                      (!/^tt\d{7,10}$/.test(draft.imdbId) &&
+                        !(draft.copyTmdbId && !draft.imdbId)) ||
                       !/^\d{1,4}$/.test(draft.season) ||
                       !/^[1-9]\d{0,3}$/.test(draft.episode)
                     }

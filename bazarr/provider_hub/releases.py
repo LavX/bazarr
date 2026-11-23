@@ -161,6 +161,8 @@ _DATA_KEY = "data:"
 # A release written now can belong to a catalog that was registered before IDs were recorded.
 _CATALOG_REGISTRATION = "catalog_registration:"
 _LEGACY_CATALOG_REGISTRATION = "legacy"
+_UNVERIFIED_LEGACY_CATALOG_REGISTRATION = "legacy-unverified"
+LEGACY_RESTAGED_REGISTRATION = "legacy-restaged"
 # What each key after the version is, in order, for the ``fields`` column.
 _FIELD_NAMES = ("path", "python_path", "manifest", "supplied_by", "activated_at")
 
@@ -239,7 +241,7 @@ def matches_catalog_registration(data: dict[str, Any], source_id: str | None, re
 
 
 def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version, manifest) -> bool:
-    """Corroborate an omitted URL with one matching entry and consistent artifact evidence."""
+    """Corroborate an installed artifact with one current catalog entry."""
     entries = data.get("catalog_entries")
     commit = source.get("resolved_commit")
     digest = manifest.get("bundle_sha256")
@@ -251,7 +253,12 @@ def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version,
         return False
 
     digest = digest.lower()
-    installed = {**manifest, "source": {key: value for key, value in manifest["source"].items() if key != "trusted"}}
+    expected_url = manifest["source"].get("catalog_url") or source["url"]
+    installed = {**manifest, "source": {key: value for key, value in manifest["source"].items()
+                                        if key not in ("catalog_url", "trusted")}}
+    # Schema 2 subtitle installs materialize the schema 1 provider ID for downstream callers.
+    if id_key == "id" and installed.get("provider_id") == plugin_id:
+        installed.pop("provider_id")
     matched = False
     for entry in entries.values():
         if not (isinstance(entry, dict) and entry.get("source") == source_id
@@ -259,20 +266,32 @@ def _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version,
                 and entry.get("resolved_commit") == commit):
             continue
         cached = entry.get("manifest")
-        cached_source = cached.get("source") if isinstance(cached, dict) else None
-        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != source["url"]:
-            continue
         # Every record for this source and release must agree on the artifact.
-        cached_digest = cached.get("bundle_sha256")
+        cached_digest = cached.get("bundle_sha256") if isinstance(cached, dict) else None
         if not isinstance(cached_digest, str) or cached_digest.lower() != digest:
             return False
+        cached_source = cached.get("source")
+        if not isinstance(cached_source, dict) or cached_source.get("catalog_url") != expected_url:
+            continue
         comparable = {**cached, "source": {key: value for key, value in cached_source.items()
                                            if key not in ("catalog_url", "trusted")}}
+        if id_key == "id" and comparable.get("provider_id") == plugin_id:
+            comparable.pop("provider_id")
         if comparable == installed:
             if matched:
                 return False
             matched = True
     return matched
+
+
+def _legacy_catalog_attested(data, source_id, plugin_id, version, manifest) -> bool:
+    sources = data.get("catalog_sources")
+    source = sources.get(source_id) if isinstance(sources, dict) else None
+    url = source.get("url") if isinstance(source, dict) and not source.get("registration") else None
+    manifest_source = manifest.get("source") if isinstance(manifest, dict) else None
+    return (isinstance(url, str) and bool(url) and isinstance(manifest_source, dict)
+            and (manifest_source.get("catalog_url") == url
+                 or _legacy_cached_manifest_matches(data, source_id, source, plugin_id, version, manifest)))
 
 
 def _legacy_catalog_registrations(data: dict[str, Any], plugin_id: str, row: dict[str, Any],
@@ -284,23 +303,12 @@ def _legacy_catalog_registrations(data: dict[str, Any], plugin_id: str, row: dic
     if (row.get("origin") != "catalog" or not isinstance(source_id, str)
             or source_id == OFFICIAL_CATALOG_SOURCE_ID or (active is None and staged is None)):
         return None
-    sources = data.get("catalog_sources")
-    source = sources.get(source_id) if isinstance(sources, dict) else None
-    url = source.get("url") if (isinstance(source, dict) and not source.get("registration")
-                               and row.get("source_bound", True) is True) else None
     registrations = {}
     for state, slot in ((ACTIVE, active), (STAGED, staged)):
-        if slot is None:
-            continue
-        manifest_source = (slot.manifest or {}).get("source")
-        matches = False
-        if isinstance(url, str) and url and isinstance(manifest_source, dict):
-            if "catalog_url" in manifest_source:
-                matches = manifest_source["catalog_url"] == url
-            else:
-                matches = _legacy_cached_manifest_matches(data, source_id, source, plugin_id, slot.version,
-                                                         slot.manifest)
-        registrations[state] = _LEGACY_CATALOG_REGISTRATION if matches else None
+        if slot is not None:
+            matches = row.get("source_bound", True) is True and _legacy_catalog_attested(
+                data, source_id, plugin_id, slot.version, slot.manifest)
+            registrations[state] = _LEGACY_CATALOG_REGISTRATION if matches else None
     row["source_bound"] = True
     if not registrations.get(STAGED, registrations.get(ACTIVE)):
         row.update(source_id=None, trusted=False, trust_note=UNKNOWN_CATALOG_SOURCE_NOTE)
@@ -503,6 +511,47 @@ class Plan:
 
     def __bool__(self) -> bool:
         return bool(self.deletes or self.updates or self.inserts)
+
+
+def backfill_legacy_registrations(data: dict[str, Any], rows: list[dict[str, Any]]) -> Plan:
+    """Record ownership once for releases already stored by pre-registration development hosts."""
+    from .state import OFFICIAL_CATALOG_SOURCE_ID
+
+    plan = Plan()
+    installations = data.get("installations")
+    if not isinstance(installations, dict):
+        return plan
+    selected = {row["plugin_id"]: row for row in rows if row["state"] == ACTIVE}
+    selected.update((row["plugin_id"], row) for row in rows if row["state"] == STAGED)
+    for release in rows:
+        plugin_id, source_id = release["plugin_id"], release.get("source_id")
+        if (release.get("origin") != "catalog" or not source_id or source_id == OFFICIAL_CATALOG_SOURCE_ID
+                or _field_value(release, _CATALOG_REGISTRATION) is not None):
+            continue
+        row = installations.get(plugin_id)
+        if not isinstance(row, dict):
+            continue
+        is_selected = selected.get(plugin_id) is release
+        bound = (not is_selected or (row.get("source_id") == source_id and row.get("source_bound", True) is True))
+        attested = bound and _legacy_catalog_attested(
+            data, source_id, plugin_id, release["version"], _loads(release.get("manifest")))
+        # Keep the old source in the release history, including a stage that must now be refused.
+        # An explicit nonmatching registration makes that decision stable across later refreshes.
+        registration = (_LEGACY_CATALOG_REGISTRATION if attested else _UNVERIFIED_LEGACY_CATALOG_REGISTRATION)
+        if (is_selected and release["state"] == STAGED and _data_key(release) is None
+                and row.get("source_bound", True) is True and row.get("source_id") != source_id
+                and catalog_registration(data, source_id) == _LEGACY_CATALOG_REGISTRATION
+                and catalog_registration(data, row.get("source_id")) == _LEGACY_CATALOG_REGISTRATION):
+            # The old writer changed the selected source without changing the release's original source.
+            # This stage can proceed only after the new catalog's entry and actual bundle are verified.
+            registration = LEGACY_RESTAGED_REGISTRATION
+        if is_selected and not attested and row.get("source_id") == source_id:
+            row.update(source_bound=True, source_id=None, trusted=False, trust_note=UNKNOWN_CATALOG_SOURCE_NOTE)
+        raw = release.get("fields")
+        fields = json.loads(raw) if raw else list(_FIELD_NAMES if release["state"] != STAGED else _FIELD_NAMES[:4])
+        fields.append(_CATALOG_REGISTRATION + registration)
+        plan.updates.append((release["id"], {"fields": json.dumps(fields)}, None))
+    return plan
 
 
 def _matches(release: dict[str, Any], slot: _Slot) -> bool:
