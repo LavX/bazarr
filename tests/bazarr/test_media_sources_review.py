@@ -655,8 +655,8 @@ def test_the_previous_owner_cannot_delete_an_item_during_handover(lib, tmp_path,
             assert let_handover_finish.wait(10)
         return write(library, *args)
 
-    def decide_deletion(*args):
-        decisions = decide(*args)
+    def decide_deletion(*args, **kwargs):
+        decisions = decide(*args, **kwargs)
         if not handover_ready.is_set() or decisions.repathed:
             return decisions
         previous_decided.set()

@@ -564,7 +564,7 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
                     for batch in _chunks(sorted(shows - {None})):
                         repository.lock_show_groups(connection, batch)
                 with _admission_transaction(connection, decisions.foreign_guard) as (target, releases):
-                    inserted = _write_library(*write_args, target, releases)
+                    inserted, refused_groups = _write_library(*write_args, target, releases)
                 for root in roots:
                     if root.local_path not in changed_roots or complete:
                         repository.record_root_device(root.id, root_snapshot[root.local_path].dev, connection)
@@ -573,7 +573,8 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
                     if item_id not in written:
                         repository.update_item(item_id, connection, owner_library_id=library.id, **change)
                 if complete and groups:
-                    repository.delete_empty_groups(groups.keys(), connection, owner_library_id=library.id)
+                    repository.delete_empty_groups(groups.keys() - refused_groups, connection,
+                                                   owner_library_id=library.id)
                 if _root_snapshot(roots) != root_snapshot:
                     raise _ServerScanChanged('root_missing', 'A folder changed before the scan could commit.')
         except (_GroupedAdmissionRefused, _ForeignClaimChanged):
@@ -584,12 +585,12 @@ def _scan_library_snapshot(source, library, roots, scan, result, cancel, session
         # roll back the group keys, so these scans keep the key changes and item writes together.
         try:
             with _admission_transaction(session, decisions.foreign_guard, holders=foreign) as (connection, releases):
-                inserted = _write_library(*write_args, connection, releases)
+                inserted, _ = _write_library(*write_args, connection, releases)
         except (_GroupedAdmissionRefused, _ForeignClaimChanged):
             result = LibraryScan(library.id)
             return refuse('partial', 'An incoming file could not be written. No item or group changes were saved.')
     else:
-        inserted = _write_library(*write_args, session)
+        inserted, _ = _write_library(*write_args, session)
 
     if plan is not None:
         for line in plan.log:
@@ -647,18 +648,17 @@ def _write_library(library, decisions, plan, group_identities, group_for_dir, re
             result.deleted += repository.delete_items(batch, connection, owner_library_id=library.id)
 
     _write_unchanged(library, decisions, group_for_dir, grouped, result, session, cancel)
-    _write_repathed(library, decisions, group_for_dir, grouped, result, session, cancel, outer_releases)
+    refused_groups = _write_repathed(library, decisions, group_for_dir, grouped, result, session, cancel,
+                                    outer_releases)
     _write_path_only(library, decisions, group_for_dir, result, session, cancel, outer_releases)
     inserted = _insert_new(library, decisions, group_for_dir, result, session, cancel, outer_releases)
 
-    if created and outer_releases is None:
-        # A refused handover can leave its newly created destination group empty.
-        handover_groups = {created[found.group_key] for _, found, handover in decisions.repathed
-                           if handover and found.group_key in created}
-        repository.delete_empty_groups(handover_groups, session, owner_library_id=library.id)
+    # Wait until the other writes can use the group. Keep existing destinations available for the retry.
+    repository.delete_empty_groups(refused_groups.intersection(created.values()), session,
+                                   owner_library_id=library.id)
     if plan is not None:
         repository.delete_empty_groups(plan.gone, session, owner_library_id=library.id)
-    return inserted
+    return inserted, refused_groups
 
 
 def _summary(result, matching, listing):
@@ -1011,6 +1011,7 @@ def _write_unchanged(library, decisions, group_for_dir, grouped, result, session
 
 def _write_repathed(library, decisions, group_for_dir, grouped, result, session, cancel, outer_releases):
     repathed = decisions.repathed
+    refused_groups = set()
     # Parsing and identifying are slow and hold nothing: they happen before the write lock is taken.
     prepared = []
     for row, found, handover in repathed:
@@ -1044,8 +1045,11 @@ def _write_repathed(library, decisions, group_for_dir, grouped, result, session,
                 except (IntegrityError, _ForeignClaimChanged) as error:
                     if entry[1].path in decisions.required_paths:
                         raise _GroupedAdmissionRefused from error
+                    _, found, handover, group_id, _ = entry
+                    if handover and group_id is not None:
+                        refused_groups.add(group_id)
                     logging.warning('BAZARR the source file could not be moved to its new path and waits for the '
-                                    'next scan: %s', entry[1].path)
+                                    'next scan: %s', found.path)
                     result.deferred += 1
                     continue
                 if deleted is not None:
@@ -1058,6 +1062,7 @@ def _write_repathed(library, decisions, group_for_dir, grouped, result, session,
                 _count_repathed(entry, result, deleted)
         if cancel is not None:
             cancel()
+    return refused_groups
 
 
 def _write_server_moves(library, moves, grouped, decisions, result, session):
