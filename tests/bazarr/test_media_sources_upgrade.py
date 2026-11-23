@@ -182,6 +182,29 @@ def record_rows(db):
     return db.execute(sa.select(table.id, table.action, table.upgradedFromId).order_by(table.id)).all()
 
 
+def _change_after_ownership_preparation(monkeypatch, change):
+    from media_sources.indexer import SourcePublicationOwnerIndex
+
+    publication = SourcePublicationOwnerIndex.publication
+
+    @contextmanager
+    def changed_publication(self, source, prepare=None, **kwargs):
+        changed = False
+
+        def changed_prepare():
+            nonlocal changed
+            prepared = prepare() if prepare is not None else None
+            if not changed:
+                change(source)
+                changed = True
+            return prepared
+
+        with publication(self, source, changed_prepare, **kwargs) as guarded:
+            yield guarded
+
+    monkeypatch.setattr(SourcePublicationOwnerIndex, 'publication', changed_publication)
+
+
 @pytest.mark.parametrize(('failure_step', 'same_name'), [
     ('remove old', False), ('publish new', False), ('commit guard', False), ('commit guard', True),
 ])
@@ -545,28 +568,34 @@ def test_source_upgrade_rechecks_ownership_and_versions_at_publication(world, mo
     publish = indexer.source_item_publication
     reached = []
 
+    def apply_change(source):
+        reached.append(source.item_id)
+        if change == 'destination owner':
+            video(media.with_name(destination.with_suffix('.mkv').name))
+        elif change == 'previous owner':
+            video(media.with_name(original.with_suffix('.mkv').name))
+        elif change == 'generated owner':
+            video(media.with_name(generated.with_suffix('.mkv').name))
+        elif change == 'symlink retarget' or change.startswith('registered '):
+            alias.unlink()
+            alias.symlink_to(competing, target_is_directory=directory_alias)
+        elif change == 'unrelated video':
+            video(media.with_name('Unrelated.mkv'))
+        elif change == 'previous edit':
+            original.write_bytes(b'Edited original subtitle')
+        else:
+            generated.write_bytes(b'Edited generated subtitle')
+
     @contextmanager
     def change_after_prepare(source, **kwargs):
         with publish(source, **kwargs) as guarded:
-            reached.append(source.item_id)
-            if change == 'destination owner':
-                video(media.with_name(destination.with_suffix('.mkv').name))
-            elif change == 'previous owner':
-                video(media.with_name(original.with_suffix('.mkv').name))
-            elif change == 'generated owner':
-                video(media.with_name(generated.with_suffix('.mkv').name))
-            elif change == 'symlink retarget' or change.startswith('registered '):
-                alias.unlink()
-                alias.symlink_to(competing, target_is_directory=directory_alias)
-            elif change == 'unrelated video':
-                video(media.with_name('Unrelated.mkv'))
-            elif change == 'previous edit':
-                original.write_bytes(b'Edited original subtitle')
-            else:
-                generated.write_bytes(b'Edited generated subtitle')
+            apply_change(source)
             yield guarded
 
-    monkeypatch.setattr(indexer, 'source_item_publication', change_after_prepare)
+    if change == 'symlink retarget' or change.startswith('registered '):
+        _change_after_ownership_preparation(monkeypatch, apply_change)
+    else:
+        monkeypatch.setattr(indexer, 'source_item_publication', change_after_prepare)
     upgrade.upgrade_source_subtitles(job_id=10)
 
     assert reached == [context.item_id]
@@ -583,6 +612,91 @@ def test_source_upgrade_rechecks_ownership_and_versions_at_publication(world, mo
         assert not destination.exists()
     assert not world.published
     assert not list(folder.glob('.bazarr-sync-obsolete-*'))
+
+
+@pytest.mark.parametrize('registry', ['source', 'mapped Arr'])
+@pytest.mark.parametrize('change', ['regular video becomes alias', 'relative subtitle folder retarget'])
+@pytest.mark.parametrize('competing', [True, False], ids=['competing', 'unrelated'])
+def test_source_upgrade_rechecks_registered_filesystem_claims_after_preparation(
+        world, monkeypatch, registry, change, competing):
+    from app.config import settings
+    from app.database import TableArrInstances, TableMovies
+    from media_sources import indexer, repository
+    from subtitles import upgrade
+    from subtitles.tools.subsync_engines import engine_output_path
+
+    context = pipeline._movie(world, 'Film.mkv')
+    media = Path(context.path)
+    relative = change == 'relative subtitle folder retarget'
+    if relative:
+        folder = media.parent / 'Subs'
+        folder.mkdir()
+        monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+        monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subs')
+    else:
+        folder = pipeline._custom_folder(world, monkeypatch, world.tmp_path)
+    original = folder / media.with_suffix('.en.srt').name
+    generated = engine_output_path(original, 'ffsubsync')
+    original.write_bytes(b'Old subtitle')
+    generated.write_bytes(b'Old generated subtitle')
+
+    other_source, other_library, other_root = add_source(
+        world.db, world.tmp_path, name='Other', folder='Other')
+    if relative:
+        registered = video(other_root / 'Film.en.mkv')
+        old_folder = world.tmp_path / 'Previous subtitles'
+        old_folder.mkdir()
+        alias = other_root / 'Subs'
+        alias.symlink_to(old_folder, target_is_directory=True)
+        target = folder if competing else world.tmp_path / 'Unrelated subtitles'
+        target.mkdir(exist_ok=True)
+    else:
+        registered = video(other_root / 'Alias.mkv')
+        alias = registered
+        target = video(other_root / ('Film.en.mkv' if competing else 'Unrelated.mkv'))
+    if registry == 'source':
+        registered_id = add_item(world.db, other_source, other_library, registered)
+    else:
+        world.db.execute(sa.insert(TableArrInstances).values(
+            id=42, kind='radarr', name='Cinema', stable_key='cinema', port=9800, enabled=1,
+            path_mappings=json.dumps([['/movies', str(other_root)]])))
+        stored_path = f'/movies/{registered.name}'
+        world.db.execute(sa.insert(TableMovies).values(
+            id=73, arr_instance_id=42, radarrId=9000, title='Other', path=stored_path, tmdbId='73'))
+    registered_realpath = registered.resolve()
+    indexer.index_item(context.item_id)
+    first = _history(world.db, world.source_id, context.item_id, media, original)
+    monkeypatch.setattr(upgrade, 'get_providers', lambda: ['fake'])
+    monkeypatch.setattr(upgrade, 'jobs_queue', Mock())
+    pipeline._download(monkeypatch)
+    reached = []
+
+    def change_after_prepare(source):
+        reached.append(source.item_id)
+        alias.unlink()
+        alias.symlink_to(target, target_is_directory=relative)
+
+    _change_after_ownership_preparation(monkeypatch, change_after_prepare)
+    upgrade.upgrade_source_subtitles(job_id=10)
+
+    assert reached == [context.item_id]
+    if relative:
+        assert registered.resolve() == registered_realpath
+    if registry == 'source':
+        assert repository.get_item(registered_id).path == str(registered)
+    else:
+        assert world.db.scalar(sa.select(TableMovies.path).where(TableMovies.id == 73)) == stored_path
+    if competing:
+        assert record_rows(world.db) == [(first, 1, None)]
+        assert original.read_bytes() == b'Old subtitle'
+        assert generated.read_bytes() == b'Old generated subtitle'
+        assert not world.published
+        assert not list(folder.glob('.bazarr-sync-obsolete-*'))
+    else:
+        assert record_rows(world.db) == [(first, 1, None), (first + 1, 3, first)]
+        assert original.read_bytes() == pipeline.CONTENT
+        assert not generated.exists()
+        assert [event.subtitle_path for event in world.published] == [str(original)]
 
 
 def test_source_upgrade_rejects_subtitle_folder_change_after_saver_selected_destination(world, monkeypatch):

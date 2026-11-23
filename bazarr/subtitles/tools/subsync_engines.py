@@ -481,7 +481,7 @@ class SyncOutputOwnerIndex:
         folders = {directory}
         if custom and mode in ('absolute', 'relative'):
             folder = custom if mode == 'absolute' else os.path.join(directory, custom)
-            folders.add(os.path.normcase(os.path.realpath(folder)))
+            folders.add(folder)
         return folders
 
     @staticmethod
