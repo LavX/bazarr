@@ -35,7 +35,7 @@ def wanted_items(*columns, kind=None, profile_id=None):
 
 def wanted_list_items(kind, session, *columns):
     return wanted_items(*columns, kind=kind).where(
-        ~identity.arr_claims_stored_path(kind, repository.Items.c.path, session))
+        ~identity.arr_claims_stored_path(repository.Items.c.path, session))
 
 
 def configured_item_kinds(session):

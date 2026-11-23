@@ -7,6 +7,7 @@ by the caller that did the work, never inside ``process_subtitle``.
 import logging
 import os
 import threading
+from dataclasses import replace
 
 from sqlalchemy.exc import IntegrityError
 
@@ -501,7 +502,17 @@ def _search_languages(context, languages, *, translation_gate, automatic=False):
     return languages
 
 
-def search_wanted_item(item_id, created_at, job_id):
+def search_wanted_fallback(source, target_language, job_id=None):
+    """Resume one rejected translation's target under the scheduled search rules."""
+    if not job_id:
+        return jobs_queue.add_job_from_function(f"Searching subtitles for {source.title}", is_progress=True,
+                                                return_existing=True)
+    return search_wanted_item(source.item_id, source.created_at, job_id, translation_gate=False,
+                              expected_source=source, target_language=target_language)
+
+
+def search_wanted_item(item_id, created_at, job_id, *, translation_gate=True, expected_source=None,
+                       target_language=None):
     """Search only stored missing languages, after rechecking eligibility and the current Arr path."""
     from .shadows import path_stage_shadow
     from .translation import stored_missing_language_candidates
@@ -516,7 +527,10 @@ def search_wanted_item(item_id, created_at, job_id):
     if item is None:
         return
     stamp = local_content_stamp(item.path)
-    if stamp is None:
+    if stamp is None or (expected_source is not None and (
+            expected_source.item_id, expected_source.path, expected_source.source_id,
+            expected_source.library_id, expected_source.wanted_file_stamp
+    ) != (item_id, item.path, item.source_id, item.library_id, stamp)):
         return
     if path_stage_shadow(item_id):
         notify_wanted_changes(item.kind)
@@ -529,8 +543,11 @@ def search_wanted_item(item_id, created_at, job_id):
         return
 
     candidates = stored_missing_language_candidates(item)
+    if target_language is not None:
+        candidates = [entry for entry in candidates if _language_code(*entry) == target_language]
+    wanted_source = replace(context, wanted_file_stamp=stamp)
     languages = [
-        entry for entry in _search_languages(context, candidates, translation_gate=True, automatic=True)
+        entry for entry in _search_languages(wanted_source, candidates, translation_gate=translation_gate, automatic=True)
         if is_search_active(_language_code(*entry), item.failed_attempts or '[]')
     ]
     if not languages or not get_providers():
@@ -544,12 +561,14 @@ def search_wanted_item(item_id, created_at, job_id):
     if not languages:
         return
     with source_search_probes(item_id):
-        downloaded = _download_source_subtitles(context, current, languages, job_id, wanted_stamp=stamp)
+        downloaded = _download_source_subtitles(context, current, languages, job_id,
+                                                translation_gate=translation_gate, wanted_stamp=stamp)
     failed = {_language_code(*entry) for entry in languages} - set(downloaded)
-    if failed:
+    if failed and local_content_stamp(context.path) == stamp:
         with source_transaction() as connection:
             current = repository.get_item(item_id, connection, for_update=True)
-            if current is None or not context.same_item(current) or current.path != context.path:
+            if (current is None or not context.same_item(current) or current.path != context.path
+                    or current.arr_shadow or current.server_missing or not current.monitored):
                 return
             failed &= {_language_code(*entry) for entry in stored_missing_language_candidates(current)}
             if failed:

@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { useArrInstances } from "@/apis/hooks/arrInstances";
 import { mediaSourcesKey } from "@/apis/hooks/mediaSources";
 import { useSportsAvailability } from "@/apis/hooks/sports";
+import { useBadges } from "@/apis/hooks/system";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { SourceAvailability } from "@/apis/raw/mediaSources";
@@ -645,3 +646,41 @@ it.each([
     );
   },
 );
+
+it("drops mixed badge counts while the Arr-only badge is pending", async () => {
+  let visible = true;
+  const legacy = Promise.withResolvers<void>();
+  function MovieBadge() {
+    return <output>{useBadges().data?.movies ?? "No count"}</output>;
+  }
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: { use_radarr: true },
+        media_sources: { visible },
+      }),
+    ),
+    http.get("/api/badges", async ({ request }) => {
+      const sources = new URL(request.url).searchParams.get("sources");
+      if (sources === "1") return HttpResponse.json({ movies: 7 });
+      await legacy.promise;
+      return HttpResponse.json({ movies: 1 });
+    }),
+  );
+
+  try {
+    customRender(<MovieBadge />);
+    expect(await screen.findByText("7")).toBeInTheDocument();
+    visible = false;
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: [QueryKeys.System, QueryKeys.Settings],
+      });
+    });
+    expect(await screen.findByText("No count")).toBeInTheDocument();
+    expect(screen.queryByText("7")).not.toBeInTheDocument();
+  } finally {
+    legacy.resolve();
+  }
+  expect(await screen.findByText("1")).toBeInTheDocument();
+});

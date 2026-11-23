@@ -202,10 +202,16 @@ def _report_runtime_skip(job_id, from_lang, to_lang, why):
         jobs_queue.update_job_name(job_id=job_id, new_job_name=f'Skipped: {from_lang.upper()} → {to_lang.upper()} ({why})')
 
 
-def _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_instance_id, source=None):
+def _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_instance_id, source=None,
+                              source_target=None):
     """A translation that cannot run falls back to the normal provider search for the same item."""
     try:
-        if source is not None:
+        if source is not None and source.wanted_file_stamp is not None:
+            from media_sources.service import search_wanted_fallback
+
+            if source_target is not None:
+                search_wanted_fallback(source, source_target)
+        elif source is not None:
             from media_sources.service import search_source_item
             search_source_item(source.item_id, translation_gate=False, expected_source=source)
         elif media_type == 'episode' and sonarr_episode_id:
@@ -218,6 +224,10 @@ def _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_inst
         raise
     except Exception:
         logging.exception('BAZARR the provider search that replaces a translation failed')
+
+
+def _source_provider_target(to_lang, forced, hi):
+    return f'{to_lang}:forced' if forced else f'{to_lang}:hi' if hi else to_lang
 
 
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
@@ -335,7 +345,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                                                  to_lang, forced, hi, expected_destination_versions)
             if expected_destination_versions and not runtime_on and not translation_available().available:
                 _report_runtime_skip(job_id, from_lang, to_lang, 'translation unavailable')
-                _search_providers_instead(media_type, None, None, None, source=source)
+                _search_providers_instead(media_type, None, None, None, source=source,
+                                          source_target=_source_provider_target(to_lang, forced, hi))
                 return None
         validate_translation_params(video_path, source_srt_file, from_lang, to_lang)
         lang_obj, orig_to_lang = convert_language_codes(to_lang, forced, hi)
@@ -479,7 +490,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             enqueue.cancel_waiting_for(job_id, source_key, to_lang, forced, hi, str(error))
         _report_runtime_skip(job_id, from_lang, to_lang, str(error))
         if expected_destination_versions and isinstance(error, SourceTranslationInputAmbiguous):
-            _search_providers_instead(media_type, None, None, None, source=source)
+            _search_providers_instead(media_type, None, None, None, source=source,
+                                          source_target=_source_provider_target(to_lang, forced, hi))
         return None
     except JobCancelled:
         raise
@@ -491,7 +503,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             logging.info('BAZARR translation skipped, the gate closed while it waited: %s', e)
             _report_runtime_skip(job_id, from_lang, to_lang, 'translation unavailable')
             _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_instance_id,
-                                      **({'source': source} if source is not None else {}))
+                                      **({'source': source, 'source_target': _source_provider_target(to_lang, forced, hi)}
+                                         if source is not None else {}))
             return None
         if quiet == 'declined':
             # Every engine asked declined the job; the provider search result stays in place. The item is held

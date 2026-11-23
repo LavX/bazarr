@@ -58,6 +58,9 @@ export function useEpisodeWantedPagination(
       ),
     false,
     fetchAll,
+    true,
+    false,
+    true,
   );
 }
 

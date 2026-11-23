@@ -1522,14 +1522,16 @@ def test_source_provider_fallback_does_not_search_a_reused_item(world, monkeypat
     providers.assert_not_called()
 
 
-@pytest.mark.parametrize("collide_after_enqueue", [False, True], ids=["preflight", "at-dispatch"])
+@pytest.mark.parametrize(("collide_after_enqueue", "automatic"), [
+    (False, False), (True, False), (True, True),
+], ids=["preflight", "at-dispatch", "wanted-at-dispatch"])
 def test_ambiguous_translation_input_leaves_provider_search_available(
-        world, monkeypatch, isolated_jobs, collide_after_enqueue):
+        world, monkeypatch, isolated_jobs, collide_after_enqueue, automatic):
     import json
 
     from app.config import settings
     from app.database import TableLanguagesProfiles, TableMovies, update_profile_id_list
-    from media_sources import service
+    from media_sources import service, wanted
     from media_sources.indexer import index_item
     from subtitles.tools.combine import main as combine
     from subtitles.tools.translate import main
@@ -1560,7 +1562,11 @@ def test_ambiguous_translation_input_leaves_provider_search_available(
     if not collide_after_enqueue:
         add_conflict()
     _download(monkeypatch, FakeSubtitle(Language("hun")))
-    service.search_source_item(context.item_id)
+    if automatic:
+        monkeypatch.setattr(wanted, "jobs_queue", isolated_jobs)
+        wanted.wanted_search_missing_subtitles_sources(kind="movie")
+    else:
+        service.search_source_item(context.item_id)
     assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
     if collide_after_enqueue:
         (translation_job,) = isolated_jobs.jobs_pending_queue
@@ -1568,8 +1574,13 @@ def test_ambiguous_translation_input_leaves_provider_search_available(
         add_conflict()
         assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
         (fallback_job,) = isolated_jobs.jobs_pending_queue
-        assert fallback_job.func == "search_source_item"
-        assert fallback_job.kwargs["translation_gate"] is False
+        if automatic:
+            assert fallback_job.func == "search_wanted_fallback"
+            assert fallback_job.kwargs["target_language"] == "hu"
+            assert fallback_job.kwargs["source"].wanted_file_stamp is not None
+        else:
+            assert fallback_job.func == "search_source_item"
+            assert fallback_job.kwargs["translation_gate"] is False
         assert isolated_jobs._run_job(isolated_jobs._reserve_next_job())
     assert not isolated_jobs.jobs_pending_queue
     factory.assert_not_called()

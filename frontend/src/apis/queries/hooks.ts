@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import {
+  hashKey,
   QueryKey,
   useQuery,
   useQueryClient,
@@ -51,6 +52,7 @@ export function usePaginationQuery<
   // key rather than the base key, which would break the [...queryKey, id]
   // individual cache the detail pages read.
   includeScores = false,
+  isolateScopes = false,
 ): UsePaginationQueryResult<TObject> {
   const client = useQueryClient();
 
@@ -101,6 +103,15 @@ export function usePaginationQuery<
 
   const results = useQuery({
     enabled,
+    ...(isolateScopes && {
+      placeholderData: (
+        previous: DataWrapperWithTotal<TObject> | undefined,
+        query: { queryKey: QueryKey } | undefined,
+      ) =>
+        query && hashKey(query.queryKey.slice(0, -2)) === hashKey(queryKey)
+          ? previous
+          : undefined,
+    }),
     queryKey: [
       ...queryKey,
       QueryKeys.Range,

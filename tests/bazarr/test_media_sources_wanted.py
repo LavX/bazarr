@@ -175,7 +175,7 @@ def test_source_row_format_preserves_local_paths_and_absolute_posters(languages_
 
 
 def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_library, tmp_path, monkeypatch):
-    from app.database import TableArrInstances, TableMovies
+    from app.database import TableArrInstances, TableMovies, TableSportsEvents
     from media_sources import repository, wanted
     from media_sources import identity
     from subtitles import download
@@ -189,7 +189,11 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
             id=row_id, arr_instance_id=2, radarrId=50 + row_id, tmdbId=str(700 + row_id), title=f'Arr {name}', path=str(path),
             profileId=1, monitored='True', movie_file_id=100, missing_subtitles="['en']"))
     arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 2).values(
-        path_mappings=json.dumps([['/incoming', str(root)]])))
+        path_mappings=json.dumps([['/earlier', str(root)], ['/incoming', str(root)]])))
+    arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 3).values(
+        path_mappings=json.dumps([['/sportarr/media', str(root)]])))
+    arr_library.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 1).values(
+        path='/sportarr/media/cross-kind path.mkv'))
     cases = {
         'bind': {'shadow_rung': 'inode', 'shadow_arr_row_id': 1, 'shadow_arr_path': '/arr/movies/Arr Movie.mkv'},
         'second': {'shadow_rung': 'attributes', 'shadow_arr_row_id': 2, 'shadow_arr_path': '/arr/movies/second.mkv'},
@@ -197,6 +201,7 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
         'owner gone': {'shadow_rung': 'inode', 'shadow_instance_id': None, 'shadow_arr_row_id': 1},
         'same path': {'arr_shadow': 0},
         'mapped path': {'arr_shadow': 0},
+        'cross-kind path': {'arr_shadow': 0},
     }
     item_ids = {}
     for title, values in cases.items():
@@ -221,7 +226,8 @@ def test_wanted_refreshes_stale_shadows_and_retains_mount_shadows(client, arr_li
     assert {call.kwargs['source'].title for call in providers.call_args_list} == {'gone', 'owner gone'}
     stat.assert_not_called()
     assert {title for title, item_id in item_ids.items() if repository.get_item(item_id).arr_shadow} == {
-        'bind', 'second', 'same path', 'mapped path'}
+        'bind', 'second', 'same path', 'mapped path', 'cross-kind path'}
+    assert repository.get_item(item_ids['cross-kind path']).shadow_arr_table == 'sports_event'
     rows = client.get('/api/movies/wanted?sources=1', headers=HEADERS).get_json()['data']
     assert {row['title'] for row in rows if row['origin'] == 'source'} == {'gone', 'owner gone'}
     assert client.get('/api/badges?sources=1', headers=HEADERS).get_json()['movies'] == 6
@@ -278,7 +284,9 @@ def test_wanted_checks_translation_before_asking_providers(world, isolated_jobs,
         pending = isolated_jobs.jobs_pending_queue
         if state in ('ready', 'moved translation'):
             assert len(pending) == 1 and pending[0].func == 'translate_subtitles_file'
-            assert pending[0].kwargs['source'] == context
+            queued_source = pending[0].kwargs['source']
+            assert queued_source.same_item(context)
+            assert queued_source.wanted_file_stamp is not None
             wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=2)
             assert len(isolated_jobs.jobs_pending_queue) == 1
         else:
@@ -420,7 +428,10 @@ def test_provider_return_rechecks_file_profile_and_arr_claim(world, monkeypatch,
 
     assert not video_path.with_suffix('.en.srt').exists()
     assert world.db.execute(sa.select(repository.History.c.id)).all() == []
-    assert bool(repository.get_item(context.item_id).arr_shadow) == (change == 'arr claimed')
+    refreshed = repository.get_item(context.item_id)
+    assert bool(refreshed.arr_shadow) == (change == 'arr claimed')
+    if change != 'profile edited':
+        assert refreshed.failed_attempts is None
 
 
 def test_explicit_api_opt_in_controls_search_all_but_not_the_source_schedule(

@@ -27,6 +27,10 @@ def live_source(source):
     state = repository.item_state(current.item_id)
     if state is None or not state.source_enabled or not state.library_enabled or not os.path.isfile(current.path):
         return None
+    if source.wanted_file_stamp is not None:
+        from .analysis import local_content_stamp
+        if local_content_stamp(current.path) != source.wanted_file_stamp:
+            return None
     return current
 
 

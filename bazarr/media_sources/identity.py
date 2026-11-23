@@ -366,10 +366,19 @@ def master_toggles():
 class _Mapper:
     """An arr instance's path mapping, loaded once, so mapping a hundred thousand rows asks the database once."""
 
-    def __init__(self, forward, reverse, rules=()):
+    def __init__(self, forward, rules=(), *, sports=False):
         self.forward = forward
-        self.reverse = reverse
         self.rules = rules
+        self.sports = sports
+
+    def candidate_paths(self, path):
+        from utilities import path_mappings as module
+
+        if self.sports:
+            mapped = (module.apply_sports_mapping(path, [rule], reverse=True) for rule in self.rules)
+        else:
+            mapped = (module._apply_mapping(path, [rule], reverse=True) for rule in self.rules)
+        return {path, *mapped}
 
 
 def _mapper_for(instance):
@@ -380,17 +389,15 @@ def _mapper_for(instance):
             mapping = module.read_sports_mappings(instance.path_mappings)
         except ValueError:
             return None
-        return _Mapper(lambda path: module.apply_sports_mapping(path, mapping),
-                       lambda path: module.apply_sports_mapping(path, mapping, reverse=True))
+        return _Mapper(lambda path: module.apply_sports_mapping(path, mapping), mapping, sports=True)
     media_type = 'movie' if instance.kind == 'radarr' else 'series'
     own = module._instance_path_mapping(instance.id, media_type)
     if own is not None:
-        return _Mapper(lambda path: module._apply_mapping(path, own, reverse=False),
-                       lambda path: module._apply_mapping(path, own, reverse=True), own)
+        return _Mapper(lambda path: module._apply_mapping(path, own, reverse=False), own)
     shared = module.path_mappings
     if media_type == 'movie':
-        return _Mapper(shared.path_replace_movie, shared.path_replace_reverse_movie, shared.path_mapping_movies)
-    return _Mapper(shared.path_replace, shared.path_replace_reverse, shared.path_mapping_series)
+        return _Mapper(shared.path_replace_movie, shared.path_mapping_movies)
+    return _Mapper(shared.path_replace, shared.path_mapping_series)
 
 
 class ArrOwners:
@@ -499,7 +506,7 @@ class ArrOwners:
                 continue
             table = TABLE_OF_KIND[instance.kind]
             model, file_id = self._columns(table)
-            arr_paths = candidates | {mapper.reverse(candidate) for candidate in candidates}
+            arr_paths = {mapped for candidate in candidates for mapped in mapper.candidate_paths(candidate)}
             for row in session.execute(sa.select(model.id, model.path, model.file_size, file_id)
                                        .where(model.arr_instance_id == instance.id, model.path.in_(arr_paths))
                                        .order_by(model.id)).all():
@@ -527,27 +534,44 @@ def _mapped_sql_path(path, rules, *, reverse=False):
     return sa.case(*matches, else_=path) if matches else path
 
 
-def arr_claims_stored_path(item_kind, path, target):
-    """A read-only exact Arr path exclusion for the mixed SQL lists and badge counts.
+def _mapped_sports_sql_path(path, rules, *, reverse=False):
+    source, target = (1, 0) if reverse else (0, 1)
+    normalized = sa.func.replace(path, '\\', '/')
+    matches = []
+    for rule in sorted(rules, key=lambda pair: len(pair[source]), reverse=True):
+        prefix = rule[source].replace('\\', '/').rstrip('/')
+        destination = rule[target]
+        suffix = sa.func.substr(normalized, len(prefix) + 1)
+        mapped = sa.literal(destination.rstrip('/\\')).concat(suffix)
+        windows_drive = destination[:1].isascii() and destination[:1].isalpha() and destination[1:3] == ':\\'
+        if destination.startswith('\\\\') or windows_drive:
+            mapped = sa.func.replace(mapped, '/', '\\')
+        matches.extend(((sa.func.rtrim(normalized, '/') == prefix, destination),
+                        (sa.func.substr(normalized, 1, len(prefix) + 1) == prefix + '/', mapped)))
+    return sa.case(*matches, else_=path) if matches else path
 
-    Mount and symlink matches still come from the recorded shadow. A direct path
-    claim made after the last scan is visible as soon as its Arr row is persisted.
+
+def arr_claims_stored_path(path, target):
+    """Exclude direct claims from every enabled Arr kind in the mixed SQL results.
+
+    Files that need a stat retain the scanner's recorded shadow. Here, reverse
+    each possible mapping to use the Arr index, then confirm the forward mapping.
     """
-    table, arr_kind = {'episode': ('episode', 'sonarr'), 'movie': ('movie', 'radarr')}[item_kind]
-    model, _ = ArrOwners._columns(table)
-    clauses = []
+    clauses = defaultdict(list)
     owners = ArrOwners.load(target)
     for instance in owners.instances.values():
-        if instance.kind != arr_kind or (mapper := owners.mapper(instance.id)) is None:
+        mapper = owners.mapper(instance.id)
+        if mapper is None:
             continue
+        model, _ = ArrOwners._columns(TABLE_OF_KIND[instance.kind])
         claim = model.path == path
         if mapper.rules:
-            # An Arr row can already use the local path, even if this owner has mappings.
-            claim = sa.and_(
-                sa.or_(claim, model.path == _mapped_sql_path(path, mapper.rules, reverse=True)),
-                _mapped_sql_path(model.path, mapper.rules) == path)
-        clauses.append(sa.and_(model.arr_instance_id == instance.id, claim))
-    return sa.select(model.id).where(sa.or_(sa.false(), *clauses)).correlate(path.table).exists()
+            mapped_path = _mapped_sports_sql_path if mapper.sports else _mapped_sql_path
+            candidates = [model.path == mapped_path(path, [rule], reverse=True) for rule in mapper.rules]
+            claim = sa.and_(sa.or_(claim, *candidates), mapped_path(model.path, mapper.rules) == path)
+        clauses[model].append(sa.and_(model.arr_instance_id == instance.id, claim))
+    return sa.or_(sa.false(), *(sa.select(model.id).where(sa.or_(*conditions)).correlate(path.table).exists()
+                                for model, conditions in clauses.items()))
 
 
 def revalidate_shadow(item, owners, queue_scan=None, fetched=None):

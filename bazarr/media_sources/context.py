@@ -1,6 +1,6 @@
 # coding=utf-8
 """The one object the shared pipeline is given for a source item."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Optional
 
@@ -39,6 +39,7 @@ class SourceItemContext:
     series_identity_source: str = 'filename'
     group_id: Optional[int] = None
     created_at: Optional[datetime] = None
+    wanted_file_stamp: Optional[tuple] = None
 
     def same_item(self, current):
         """SQLite may reuse the integer id of a deleted item."""
@@ -121,4 +122,4 @@ def resolve_same_item(source):
     if not source.same_item(current) or (source.source_id, source.library_id, source.path, source.kind) != (
             current.source_id, current.library_id, current.path, current.kind):
         return None
-    return current
+    return replace(current, wanted_file_stamp=source.wanted_file_stamp) if source.wanted_file_stamp else current

@@ -154,6 +154,7 @@ describe("socketio reducer", () => {
       [QueryKeys.Series, QueryKeys.Wanted],
       [QueryKeys.Movies, QueryKeys.Wanted],
       [QueryKeys.System, QueryKeys.Badges],
+      [QueryKeys.System, QueryKeys.Languages, "audio", true],
     ]) {
       expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
         queryKey,

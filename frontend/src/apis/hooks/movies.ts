@@ -112,6 +112,9 @@ export function useMovieWantedPagination(
       ),
     false,
     fetchAll,
+    true,
+    false,
+    true,
   );
 }
 

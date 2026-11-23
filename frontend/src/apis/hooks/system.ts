@@ -22,6 +22,7 @@ export function useBadges() {
   return useQuery({
     queryKey: [QueryKeys.System, QueryKeys.Badges, includeSources],
     queryFn: () => api.badges.all(includeSources),
+    placeholderData: undefined,
     refetchOnWindowFocus: "always",
     refetchInterval: 1000 * 60,
     staleTime: 1000 * 10,
