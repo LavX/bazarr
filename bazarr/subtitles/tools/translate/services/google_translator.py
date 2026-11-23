@@ -8,7 +8,7 @@ from media_servers.events import publication_callback
 
 from retry.api import retry
 from app.config import settings  # noqa: F401
-from ..core.translator_utils import (add_translator_info, create_process_result,
+from ..core.translator_utils import (load_translation_input, add_translator_info, create_process_result,
                                      record_source_translation, require_source_translation, translation_write_kwargs)
 from sonarr.history import history_log
 from radarr.history import history_log_movie
@@ -71,7 +71,7 @@ class GoogleTranslatorService:
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
                                        allow_empty=self.sports_operation is None and self.source is None,
                                        **translation_write_kwargs(self, job_id)) as temporary:
-                subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+                subs = load_translation_input(self, pysubs2.load)
                 if not self.sports_operation:
                     subs.remove_miscellaneous_events()
                 lines_list = [x.plaintext for x in subs]

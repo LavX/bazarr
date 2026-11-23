@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from contextlib import nullcontext
 import sys
 
@@ -54,6 +55,7 @@ class Subtitles(Resource):
     get_request_parser.add_argument(
         "sportsEventId", type=int, required=False, help="Local sports event id"
     )
+    get_request_parser.add_argument("sourceItemId", type=int, help="Local media source item id")
     get_request_parser.add_argument(
         "arr_instance_id",
         type=int,
@@ -114,6 +116,19 @@ class Subtitles(Resource):
         movieId = args.get("radarrMovieId", None)
         sportsEventId = args.get("sportsEventId", None)
         arr_instance_id = args.get("arr_instance_id")
+        source_id = args.get("sourceItemId")
+        if source_id is not None:
+            from media_sources.subtitle_tools import SourceToolError, indexed_sidecar, tool_item
+
+            if any(value is not None for value in (episodeId, movieId, sportsEventId)):
+                return "Source and Arr media identifiers cannot be combined", 400
+            try:
+                source, item = tool_item(source_id, arr_instance_id)
+                subtitle = indexed_sidecar(source, item, path=subtitlesPath)
+            except SourceToolError as error:
+                return str(error), error.status
+            result = subtitles_sync_references(subtitles_path=subtitle.path, source_item=(source, item))
+            return marshal(result, self.get_response_model, envelope="data")
 
         result = subtitles_sync_references(
             subtitles_path=subtitlesPath,
@@ -161,11 +176,11 @@ class Subtitles(Resource):
     )
     patch_request_parser.add_argument(
         "type", type=str, required=True,
-        help='Media type from ["episode", "movie", "sports"]'
+        help='Media type from ["episode", "movie", "sports", "source"]'
     )
     patch_request_parser.add_argument(
         "id", type=int, required=True,
-        help="Media ID (episodeId, radarrId, or the local sports event id)"
+        help="Upstream episode or movie ID, local sports event ID, or source item ID"
     )
     patch_request_parser.add_argument(
         "arr_instance_id",
@@ -294,6 +309,9 @@ class Subtitles(Resource):
         arr_instance_id = args.get("arr_instance_id")
         forced = True if args.get("forced") == "True" else False
         hi = True if args.get("hi") == "True" else False
+
+        if media_type == "source":
+            return _source_subtitle_action(args, subtitles_path, language, hi, forced, pin)
 
         if action == "extract" and subtitles_path:
             return "Extract to file works on an embedded track, which has no path.", 400
@@ -743,6 +761,65 @@ class Subtitles(Resource):
         return "", 204
 
 
+def _source_subtitle_action(args, subtitles_path, language, hi, forced, pin):
+    from media_sources.subtitle_tools import SourceSubtitleTool, SourceToolError, indexed_sidecar, tool_item
+
+    action = args['action']
+    if not subtitles_path or action in ('extract', 'ocr'):
+        return 'Source subtitle tools require an indexed external subtitle.', 400
+    try:
+        source, item = tool_item(args['id'], args['arr_instance_id'])
+        subtitle = indexed_sidecar(source, item, path=subtitles_path)
+        if action == 'translate':
+            from_language = args['from_language'] or subtitle.language.split(':', 1)[0]
+            if any(not code or len(code) != 2 or not alpha3_from_alpha2(code) for code in (from_language, language)):
+                return 'Source and target languages must be valid alpha2 codes.', 400
+            source_tool = SourceSubtitleTool.capture(source, subtitle)
+            pin_translation(source.path, subtitle.path, language, forced, hi, None, pin, source=source)
+            job_id = translate_subtitles_file(
+                video_path=source.path, source_srt_file=subtitle.path, from_lang=from_language, to_lang=language,
+                forced=forced, hi=hi, media_type='episode' if source.kind == 'episode' else 'movies',
+                sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, metadata=None, source=source,
+                source_tool=source_tool,
+            )
+            return queued_job_response(job_id or None), 202
+
+        if action == 'sync':
+            if is_sync_engine_output(subtitle.path):
+                return 'Generated sync output files cannot be synchronized again.', 400
+            requested_reference = args['reference']
+            reference = None
+            if requested_reference in empty_values or requested_reference == source.path:
+                requested_reference = source.path
+            elif not re.fullmatch(r'[as]:[0-9]+', requested_reference):
+                reference = indexed_sidecar(source, item, path=requested_reference)
+                requested_reference = reference.path
+            code, *flags = subtitle.language.split(':')
+            job_id = sync_subtitles(
+                video_path=source.path, srt_path=subtitle.path, srt_lang=code,
+                hi=any(flag.lower() == 'hi' for flag in flags), forced='forced' in flags,
+                percent_score=0, reference=requested_reference,
+                max_offset_seconds=args['max_offset_seconds'] if args['max_offset_seconds'] not in empty_values else None,
+                no_fix_framerate=args['no_fix_framerate'] == 'True', gss=args['gss'] == 'True',
+                output_mode=args['output_mode'] if args['output_mode'] not in empty_values else None,
+                enabled_engines=args['enabled_engines'] if args['enabled_engines'] not in empty_values else None,
+                force_sync=True, return_job_id=True, source=source,
+                source_tool=SourceSubtitleTool.capture(source, subtitle, reference),
+            )
+            return {'job_id': job_id or None}, 202
+
+        job_id = apply_subtitle_mods(
+            language=subtitle.language.split(':', 1)[0], subtitle_path=subtitle.path, mods=[action],
+            video_path=source.path, media_type='source', media_id=source.item_id, never_replace=True,
+            require_within_area=True, source_tool=SourceSubtitleTool.capture(source, subtitle),
+        )
+        return {'job_id': job_id or None}, 202
+    except SourceToolError as error:
+        return str(error), error.status
+    except (OSError, ValueError) as error:
+        return str(error), 409
+
+
 def _embedded_track_action(action, args, language, hi, forced, media_type, media_id, arr_instance_id):
     """Queue Extract to file, or a tool that first extracts, for one embedded track.
 
@@ -960,7 +1037,9 @@ class SubtitleScoreOverride(Resource):
 
 
 def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, arr_instance_id=None,
-                          source=None):
+                          source=None, reindex=True):
+    if media_type == 'source' and source is None:
+        raise ValueError('A source subtitle requires its media item context')
     # apply chmod if required
     chmod = (
         int(settings.general.chmod, 8)
@@ -996,7 +1075,8 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
     if source is not None:
         from media_sources.indexer import index_and_notify_item
 
-        index_and_notify_item(source)
+        if reindex:
+            index_and_notify_item(source)
         return
 
     if media_type == "sports":

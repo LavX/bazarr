@@ -30,7 +30,7 @@ from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, Subtitl
                                              capture_subtitle_versions, staged_subtitle_write,
                                              validate_subtitle_versions)
 
-from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
+from ..core.translator_utils import (load_translation_input, add_translator_info, create_process_result, get_title,
                                      record_source_translation, require_source_translation, translation_write_kwargs)
 from .failure import MESSAGES
 from .dispatch import DispatchFailed, Dispatcher, JobSpec, LegacyDeclined, LegacyResult
@@ -178,7 +178,7 @@ class RuntimeTranslatorService:
         self._source_real = os.path.realpath(self.source_srt_file)
         self._versions = capture_subtitle_versions(self.video_path, (self._source_real, self.dest_srt_file),
                                                    self.cancel)
-        subs = pysubs2.load(self.source_srt_file, encoding="utf-8")
+        subs = load_translation_input(self, pysubs2.load)
         lines = [x.plaintext for x in subs]
         if not lines:
             if self.sports_operation:

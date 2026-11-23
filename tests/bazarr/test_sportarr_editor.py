@@ -51,7 +51,7 @@ def test_the_media_type_list_is_defined_once():
 
     source = inspect.getsource(editor)
     assert source.count("('episode', 'movie')") == 0
-    assert "MEDIA_TYPES = ('episode', 'movie', 'sports')" in source
+    assert 'sports' in editor.MEDIA_TYPES
 
 
 def test_the_event_video_resolves_through_the_owning_instance(sports_event):

@@ -302,6 +302,17 @@ def _refresh_current_sports_outputs(context, signature, result, versions):
     _index_sports_outputs(context)
 
 
+def _finish_source_tool_sync(subsync, completed, source, srt_lang, hi, forced):
+    from api.subtitles.subtitles import postprocess_subtitles
+    from media_sources.indexer import index_and_notify_item
+
+    for output in completed.successful_results:
+        subsync._log_sync_history(output, completed.output_mode, srt_lang, hi, forced, source=source)
+        postprocess_subtitles(output.output_path, source.path, 'source', None, source.item_id,
+                              source=source, reindex=False)
+    index_and_notify_item(source)
+
+
 def _index_sports_outputs(context):
     from app.event_handler import event_stream
     from subtitles.indexer.sports import store_subtitles_sports
@@ -368,10 +379,14 @@ def sync_subtitles(video_path,
                    cancel=None,
                    publication_guard=None,
                    return_job_id=False,
-                   source=None):
+                   source=None,
+                   source_tool=None):
     """Synchronize a subtitle. For keep-all output without a media owner, pass an indexing callback."""
     if source is not None and context is not None:
         raise ValueError('A source item cannot be combined with a sports context')
+    if source_tool is not None and (source != source_tool.source or srt_path != source_tool.sidecar.path
+                                    or video_path != source_tool.source.path):
+        raise ValueError('Synchronization requires the captured source item and subtitle')
     try:
         if context is not None:
             if validate is None or publication_guard is None:
@@ -493,6 +508,9 @@ def sync_subtitles(video_path,
             }
             if source is not None:
                 sync_kwargs['source'] = source
+            if source_tool is not None:
+                sync_kwargs.update(write_history=False, validate=source_tool.validate,
+                                   path_publication_guard=source_tool.publication)
             if context is not None:
                 from sportarr.subtitles import candidate_signature
                 sports_signature = candidate_signature(context)
@@ -516,7 +534,8 @@ def sync_subtitles(video_path,
                     if callback:
                         if source_version is None:
                             callback()
-                    elif context is None and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
+                    elif source_tool is None and context is None and (
+                            getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL):
                         _index_keep_all_outputs(
                             video_path,
                             sonarr_series_id=sonarr_series_id,
@@ -550,6 +569,8 @@ def sync_subtitles(video_path,
                 try:
                     try:
                         completed = sync_result or getattr(subsync, 'sync_result', None)
+                        if source_tool is not None and completed and completed.success:
+                            _finish_source_tool_sync(subsync, completed, source, srt_lang, hi, forced)
                         if (context is not None and not callback and not sports_refresh_attempted
                                 and completed and completed.success):
                             try:

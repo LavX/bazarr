@@ -29,7 +29,7 @@ from subtitles.tools.subsync_engines import (create_preview_workspace, discard_p
                                              is_sync_engine_language_key)
 
 from ..utils import authenticate_header_only, authenticate_header_or_stream_token
-from .stream_token import mint_stream_token, stream_token_lifetime
+from .stream_token import mint_stream_token, parse_stream_token, stream_token_lifetime
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +163,8 @@ def _payload_arr_instance_id(data):
 # The media types the editor works on. One tuple rather than six hardcoded
 # pairs: the copies are what left sports rejected at five separate gates while
 # the sixth already understood it.
-MEDIA_TYPES = ('episode', 'movie', 'sports')
-MEDIA_TYPE_ERROR = 'mediaType must be one of "episode", "movie", "sports"'
+MEDIA_TYPES = ('episode', 'movie', 'sports', 'source')
+MEDIA_TYPE_ERROR = 'mediaType must be one of "episode", "movie", "sports", "source"'
 # Maps an accepted request value to the tuple's own string, so validation
 # hands back a constant and never the request's copy of it.
 _CANONICAL_MEDIA_TYPES = {media_type: media_type for media_type in MEDIA_TYPES}
@@ -175,6 +175,15 @@ def _resolve_video_path(media_type, media_id, arr_instance_id=None):
 
     Returns the mapped file path on success, or a (message, status_code) tuple on failure.
     """
+    if media_type == 'source':
+        from media_sources.subtitle_tools import SourceToolError, tool_item
+
+        try:
+            source, _ = tool_item(media_id, arr_instance_id)
+        except SourceToolError as error:
+            return str(error), error.status
+        return source.path
+
     if media_type == 'episode':
         row = database.execute(
             scoped(
@@ -358,6 +367,21 @@ def _validate_params():
     return media_type, media_id
 
 
+def _resolve_source_stream(media_id, arr_instance_id):
+    from media_sources.subtitle_tools import SourceToolError, source_video_stamp, tool_item
+
+    try:
+        source, _ = tool_item(media_id, arr_instance_id)
+    except SourceToolError as error:
+        return None, None, (str(error), error.status)
+    stamp = source_video_stamp(source.path)
+    if stamp is None:
+        return None, None, ('Video file not accessible', 404)
+    scope = hashlib.sha256(repr((source.source_id, source.library_id, source.created_at, source.path, stamp))
+                           .encode()).hexdigest()
+    return source.path, scope, None
+
+
 def _resolve_or_abort():
     """Validate params and resolve video path. Returns (video_path,) or a Flask error tuple."""
     params = _validate_params()
@@ -383,7 +407,7 @@ def _resolve_or_abort():
 
 
 def _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track_idx, start_time_sec, mtime,
-                   native_hls=False):
+                   native_hls=False, source_scope=None):
     """Stable cache dir per (media, audio track, start time, file mtime) tuple.
 
     start_time_sec lets callers spawn fresh sessions that begin somewhere other
@@ -404,6 +428,8 @@ def _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track_idx, start
         f"{HLS_CACHE_VERSION}:{'native' if native_hls else 'mse'}:{media_type}:{media_id}:"
         f"{arr_instance_id or ''}:{audio_track_idx}:{start_time_sec:.3f}:{int(mtime)}"
     )
+    if source_scope is not None:
+        raw += f':{source_scope}'
     key = hashlib.md5(raw.encode()).hexdigest()[:16]
     return os.path.join(HLS_CACHE_DIR, key)
 
@@ -1008,10 +1034,20 @@ class EditorHls(Resource):
         # through hls.js and gets H.264 when the source would not be playable.
         native_hls = bool(getattr(g, 'editor_hls_stream_token', None))
 
-        resolved = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
-        if isinstance(resolved, tuple):
-            return resolved
-        video_path = resolved
+        source_scope = None
+        if media_type == 'source':
+            video_path, source_scope, error = _resolve_source_stream(media_id, arr_instance_id)
+            if error is not None:
+                return error
+            if native_hls:
+                token = parse_stream_token(g.editor_hls_stream_token)
+                if token is None or token.get('s') != source_scope:
+                    return 'Invalid stream token for this source item', 401
+        else:
+            resolved = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
+            if isinstance(resolved, tuple):
+                return resolved
+            video_path = resolved
         if not os.path.isfile(video_path):
             return 'Video file not found on disk', 404
 
@@ -1020,8 +1056,10 @@ class EditorHls(Resource):
         except OSError:
             return 'Video file not accessible', 404
 
+        # Source IDs can be reused. A newly admitted file must never see the old stream's cache.
         cache_dir = _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track, start_time_sec,
-                                   mtime, native_hls=native_hls)
+                                   mtime, native_hls=native_hls,
+                                   **({'source_scope': source_scope} if source_scope is not None else {}))
 
         # Defense-in-depth: the filename regex above already blocks path
         # traversal, but we also normalise via realpath (resolves symlinks,
@@ -1196,10 +1234,16 @@ class EditorStreamToken(Resource):
         if audio_track < 0:
             return _token_route_response(('audioTrack must be >= 0', 400))
 
-        resolved = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
-        if isinstance(resolved, tuple):
-            return _token_route_response(resolved)
-        video_path = resolved
+        source_scope = None
+        if media_type == 'source':
+            video_path, source_scope, error = _resolve_source_stream(media_id, arr_instance_id)
+            if error is not None:
+                return _token_route_response(error)
+        else:
+            resolved = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
+            if isinstance(resolved, tuple):
+                return _token_route_response(resolved)
+            video_path = resolved
         if not os.path.isfile(video_path):
             return _token_route_response(('Video file not found on disk', 404))
 
@@ -1223,7 +1267,8 @@ class EditorStreamToken(Resource):
                 pass
 
         lifetime = stream_token_lifetime(duration)
-        token = mint_stream_token(media_type, media_id, arr_instance_id, audio_track, lifetime)
+        token = mint_stream_token(media_type, media_id, arr_instance_id, audio_track, lifetime,
+                                  **({'source_scope': source_scope} if source_scope is not None else {}))
         return _token_route_response({'token': token, 'lifetime': lifetime})
 
 
@@ -1359,6 +1404,22 @@ class EditorSubtitles(Resource):
         arr_instance_id = _request_arr_instance_id()
         if isinstance(arr_instance_id, tuple):
             return arr_instance_id
+
+        if media_type == 'source':
+            from media_sources.subtitle_tools import SourceToolError, indexed_sidecar, indexed_subtitles, tool_item
+
+            try:
+                source, item = tool_item(media_id, arr_instance_id)
+            except SourceToolError as error:
+                return str(error), error.status
+            subtitles = []
+            for language, path in indexed_subtitles(item):
+                try:
+                    subtitle = indexed_sidecar(source, item, path=path)
+                except SourceToolError:
+                    continue
+                subtitles.append({'language': language, 'format': os.path.splitext(subtitle.path)[1][1:].lower()})
+            return {'subtitles': subtitles}
 
         if media_type == 'episode':
             row = database.execute(

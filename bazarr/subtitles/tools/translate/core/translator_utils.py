@@ -3,6 +3,7 @@
 import logging
 import os
 import srt
+import pysubs2
 import datetime
 from contextlib import contextmanager
 
@@ -92,6 +93,20 @@ def translated_destination_path(video_path, to_lang, forced, hi):
     )
 
 
+def load_translation_input(translator, loader):
+    """Read an explicitly selected source subtitle from its captured regular file."""
+    source_tool = getattr(translator, 'source_tool', None)
+    if source_tool is None:
+        return loader(translator.source_srt_file, encoding='utf-8')
+
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged
+
+    try:
+        return pysubs2.SSAFile.from_string(source_tool.sidecar.read().decode('utf-8'))
+    except (OSError, SubtitleSourceChanged) as error:
+        raise SourceTranslationChanged('The source subtitle changed before translation') from error
+
+
 def translation_write_kwargs(translator, job_id):
     """The staged_subtitle_write arguments this translation's own context adds.
 
@@ -113,7 +128,10 @@ def translation_write_kwargs(translator, job_id):
         from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged
         from media_sources.translation import automatic_translation_is_current
 
+        from subtitles.tools.subsync_engines import SubtitleSourceChanged
+
         owners = SourcePublicationOwnerIndex()
+        source_tool = getattr(translator, 'source_tool', None)
 
         def prepare():
             return validate_source_translation(source, translator.video_path, translator.source_srt_file,
@@ -127,12 +145,14 @@ def translation_write_kwargs(translator, job_id):
                         current, connection, prepared):
                     if current is None or current.profile_id != prepared.profile_id:
                         raise SourceTranslationChanged('The source item moved, was disabled, or its profile changed')
+                    if source_tool is not None:
+                        source_tool.check_current(current, connection)
                     if captured and not automatic_translation_is_current(
                             current, translator.source_srt_file, translator.from_lang, translator.orig_to_lang,
                             translator.forced, translator.hi, connection=connection):
                         raise SourceTranslationChanged('The source translation is no longer eligible')
                     yield
-            except SourcePublicationOwnersChanged as error:
+            except (SourcePublicationOwnersChanged, SubtitleSourceChanged) as error:
                 raise SourceTranslationChanged(str(error)) from error
         kwargs.update(publication_guard=publication, ownership_index=owners)
     return kwargs
