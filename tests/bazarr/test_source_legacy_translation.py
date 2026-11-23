@@ -141,6 +141,58 @@ def test_source_legacy_translation_keeps_runtime_input_version_without_a_manual_
     assert toolbox.db.execute(sa.select(repository.History)).all() == []
 
 
+def test_source_legacy_translation_skips_when_the_configured_input_folder_moves(
+        toolbox, legacy_runtime, monkeypatch):
+    from app.config import settings
+    from media_sources import repository
+    from media_sources.indexer import index_item
+    from subtitles.tools.translate import main
+    from subtitles.tools.translate.runtime import service
+    from subtitles.tools.translate.services import lingarr_translator
+
+    context = tools.pipeline._episode(toolbox.world)
+    video = Path(context.path)
+    folder = video.parent / 'Subs'
+    first = video.parent / 'Original subtitles'
+    second = video.parent / 'Replacement subtitles'
+    for directory in (first, second):
+        directory.mkdir()
+    name = video.with_suffix('.en.srt').name
+    (first / name).write_text(tools.SRT)
+    (second / name).write_text(tools.SRT.replace('Original cue', 'Replacement cue'))
+    folder.symlink_to(first, target_is_directory=True)
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', folder.name)
+    assert index_item(context.item_id) is not None
+    path = folder / name
+    target = video.with_suffix('.hu.srt')
+    target.write_text(tools.SRT)
+    original = service.RuntimeTranslatorService._legacy
+    translated = []
+
+    def legacy(self, engine, instance):
+        folder.unlink()
+        folder.symlink_to(second, target_is_directory=True)
+        return original(self, engine, instance)
+
+    def translate(self, lines, job_id):
+        translated.extend(lines)
+        return [{'position': i, 'line': f'Translated {line}'} for i, line in enumerate(lines)]
+
+    monkeypatch.setattr(service.RuntimeTranslatorService, '_legacy', legacy)
+    monkeypatch.setattr(lingarr_translator.LingarrTranslatorService, '_translate_content', translate)
+    job_id = main.translate_subtitles_file(context.path, str(path), 'en', 'hu', False, False, 'episode',
+                                            None, None, None, None, source=context)
+    job = toolbox.jobs._reserve_next_job()
+    assert job.job_id == job_id and job.kwargs['source_tool'] is None
+    assert job.kwargs['expected_destination_versions'] == ()
+    assert toolbox.jobs._run_job(job)
+
+    assert translated == []
+    assert target.read_text() == tools.SRT
+    assert toolbox.db.execute(sa.select(repository.History)).all() == []
+
+
 def test_automatic_source_legacy_translation_keeps_profile_eligibility(toolbox, legacy_runtime, monkeypatch):
     from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list

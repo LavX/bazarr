@@ -172,14 +172,16 @@ def test_queued_source_mod_rechecks_the_configured_subtitle_folder(toolbox, monk
 
 
 @pytest.mark.parametrize('custom', ['Subs', '../Subs'])
-def test_source_video_links_use_the_stored_video_directory_for_relative_sidecars(toolbox, monkeypatch, custom):
+@pytest.mark.parametrize('linked_name', ['Film.mkv', 'Alias.mkv'])
+def test_source_video_links_use_the_stored_video_directory_for_relative_sidecars(
+        toolbox, monkeypatch, custom, linked_name):
     from app.config import settings
     from media_sources import repository
     from media_sources.context import resolve_item
     from media_sources.indexer import index_item
 
     context = tools.pipeline._movie(toolbox.world, 'Storage/Video/Film.mkv')
-    linked_video = toolbox.world.root / 'Linked' / 'Film.mkv'
+    linked_video = toolbox.world.root / 'Linked' / linked_name
     linked_video.parent.mkdir()
     linked_video.symlink_to(context.path)
     repository.update_item(context.item_id, toolbox.db, path=str(linked_video))
@@ -188,7 +190,7 @@ def test_source_video_links_use_the_stored_video_directory_for_relative_sidecars
     monkeypatch.setattr(settings.general, 'subfolder_custom', custom)
     directory = linked_video.parent / custom
     directory.mkdir(exist_ok=True)
-    path = directory / 'Film.en.srt'
+    path = directory / linked_video.with_suffix('.en.srt').name
     path.write_text(tools.SRT)
     assert index_item(context.item_id) is not None
     assert str(path) in repository.get_item(context.item_id).subtitles

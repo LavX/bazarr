@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -204,7 +205,21 @@ export default function EditorPage() {
   // two text tracks of one key with different codecs: moving from one to the
   // other must load the other, or the next Save would write the first one's
   // text under the second one's name.
-  const subtitleKey = `${language}|${source ?? ""}|${codec ?? ""}`;
+  const subtitleKey = JSON.stringify([
+    mediaType,
+    mediaId,
+    scopedArrInstanceId,
+    language,
+    source,
+    codec,
+  ]);
+  const currentSubtitleKeyRef = useRef<string | null>(subtitleKey);
+  useLayoutEffect(() => {
+    currentSubtitleKeyRef.current = subtitleKey;
+    return () => {
+      currentSubtitleKeyRef.current = null;
+    };
+  }, [subtitleKey]);
   const prevSubtitleKeyRef = useRef(subtitleKey);
   useEffect(() => {
     if (prevSubtitleKeyRef.current !== subtitleKey) {
@@ -1986,11 +2001,14 @@ export default function EditorPage() {
           <Anchor component={Link} to={listPath}>
             {listLabel}
           </Anchor>
-          {data?.mediaTitle && detailPath && (
-            <Anchor component={Link} to={detailPath}>
-              {data.mediaTitle}
-            </Anchor>
-          )}
+          {data?.mediaTitle &&
+            (detailPath ? (
+              <Anchor component={Link} to={detailPath}>
+                {data.mediaTitle}
+              </Anchor>
+            ) : (
+              <Text>{data.mediaTitle}</Text>
+            ))}
           {data?.episodeTitle && <Text>{data.episodeTitle}</Text>}
           <Menu shadow="md" width={260} position="bottom-start" withinPortal>
             <Menu.Target>
@@ -2104,6 +2122,7 @@ export default function EditorPage() {
         canRedo={docState.redoStack.length > 0}
         format={format}
         language={data?.language ?? language ?? ""}
+        canSaveAs={mediaType !== "source"}
         bookmarkFilterActive={bookmarkFilterActive}
         bookmarkCount={bookmarkedIds.size}
         onToggleBookmarkFilter={() => setBookmarkFilterActive((v) => !v)}
@@ -2255,6 +2274,7 @@ export default function EditorPage() {
             onClose={() => setQcOpen(false)}
           />
           <TimingToolsPanel
+            key={subtitleKey}
             open={timingOpen}
             cues={docState.cues}
             selectedIndices={multiSelect}
@@ -2264,11 +2284,21 @@ export default function EditorPage() {
             language={language}
             onApplyBatch={handleTimingApplyBatch}
             onGetContent={() => {
+              if (isPlaceholderData || !loaded || !data) return null;
               const pr = buildParseResult();
               const serialized = getSerializer(format).serialize(pr);
               return { content: serialized, format, encoding };
             }}
             onApplySyncedContent={(syncedContent: string) => {
+              if (currentSubtitleKeyRef.current !== subtitleKey) {
+                showNotification({
+                  title: "Sync",
+                  message:
+                    "Sync finished for a different subtitle; its cues were not loaded.",
+                  color: "yellow",
+                });
+                return false;
+              }
               try {
                 const parsed = getParser(format).parse(syncedContent);
                 if (parsed.cues.length === 0) {
@@ -2277,7 +2307,7 @@ export default function EditorPage() {
                     message: "Synced content has no cues",
                     color: "yellow",
                   });
-                  return;
+                  return false;
                 }
                 dispatch({ type: "LOAD", cues: parsed.cues });
                 showNotification({
@@ -2285,12 +2315,14 @@ export default function EditorPage() {
                   color: "green",
                   autoClose: 3000,
                 });
+                return true;
               } catch (err) {
                 showNotification({
                   title: "Error",
                   message: `Failed to parse synced content: ${(err as Error).message}`,
                   color: "red",
                 });
+                return false;
               }
             }}
             onClose={() => setTimingOpen(false)}

@@ -107,7 +107,7 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
                 if directory not in canonical_directories:
                     canonical_directories[directory] = os.path.normcase(os.path.realpath(directory))
                 folders.add(canonical_directories[directory])
-            stem = _normalized_media_stem(mapped)
+            stem = _normalized_media_stem(path)
             for folder in folders:
                 owners.setdefault((folder, stem), set()).add(mapped)
         return owners

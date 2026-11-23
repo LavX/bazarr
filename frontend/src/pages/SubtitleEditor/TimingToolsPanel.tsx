@@ -33,7 +33,7 @@ interface TimingToolsPanelProps {
     format: string;
     encoding: string;
   } | null;
-  onApplySyncedContent: (content: string) => void;
+  onApplySyncedContent: (content: string) => boolean | void;
   onClose: () => void;
 }
 
@@ -570,7 +570,7 @@ function AutoSyncTab({
     format: string;
     encoding: string;
   } | null;
-  onApplySyncedContent: (content: string) => void;
+  onApplySyncedContent: (content: string) => boolean | void;
 }) {
   const [maxOffset, setMaxOffset] = useState("120");
   const [gss, setGss] = useState(false);
@@ -679,7 +679,12 @@ function AutoSyncTab({
               return;
             }
 
-            onApplySyncedContent(results[0]?.content ?? pollResult.content);
+            if (
+              onApplySyncedContent(
+                results[0]?.content ?? pollResult.content,
+              ) === false
+            )
+              return;
             showNotification({
               message: "Sync complete, cues updated",
               color: "green",
@@ -768,7 +773,7 @@ function AutoSyncTab({
       (item) => item.engine === selectedEngine,
     );
     if (!selected) return;
-    onApplySyncedContent(selected.content);
+    if (onApplySyncedContent(selected.content) === false) return;
     showNotification({
       message: `${syncEngineLabel(selected.engine)} result loaded into editor`,
       color: "green",

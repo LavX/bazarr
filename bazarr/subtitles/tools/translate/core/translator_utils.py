@@ -94,10 +94,17 @@ def translated_destination_path(video_path, to_lang, forced, hi):
 
 
 def load_translation_input(translator, loader):
-    """Read an explicitly selected source subtitle from its captured regular file."""
+    """Read from the captured input when a source tool or the runtime has bound it."""
     source_tool = getattr(translator, 'source_tool', None)
     if source_tool is None:
-        return loader(translator.source_srt_file, encoding='utf-8')
+        path = translator.source_srt_file
+        runtime_versions = getattr(translator, 'expected_runtime_versions', ())
+        if runtime_versions:
+            captured_input = runtime_versions[0].path
+            if os.path.realpath(path) != captured_input:
+                raise SourceTranslationChanged('The source subtitle now resolves to a different file')
+            path = captured_input
+        return loader(path, encoding='utf-8')
 
     from subtitles.tools.subsync_engines import SubtitleSourceChanged
 
