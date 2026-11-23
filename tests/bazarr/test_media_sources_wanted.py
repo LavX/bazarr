@@ -532,16 +532,69 @@ def test_wanted_rechecks_a_release_excluded_on_another_source_item(
     assert [event.operation for event in world.published] == ['delete']
 
 
-def test_wanted_leaves_a_real_uploaded_language_sibling_before_upload_indexing(world, monkeypatch):
+def test_keyed_wanted_publication_keeps_the_subtitle_folder_stable(world, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from app import config
+    from media_sources import repository, wanted
+    from subtitles.tools import subsync_engines
+
+    settings = config.settings
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'Subtitles')
+    context = pipeline._movie(world)
+    destination = Path(context.path).with_suffix('.en.srt')
+    pipeline._download(monkeypatch)
+    real_replace = subsync_engines.os.replace
+    changed = Event()
+    checks = []
+
+    def save_settings():
+        with config._subtitle_settings_write_guard():
+            settings.general.subfolder = 'relative'
+            changed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def replace(staged, installed):
+            if Path(installed) == destination:
+                checks.append(pool.submit(save_settings))
+                with config._subtitle_settings_condition:
+                    assert config._subtitle_settings_condition.wait_for(
+                        lambda: config._subtitle_settings_saving or changed.is_set(), timeout=2)
+                assert not changed.is_set()
+                assert settings.general.subfolder == 'current'
+            return real_replace(staged, installed)
+
+        monkeypatch.setattr(subsync_engines.os, 'replace', replace)
+        wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
+        (save,) = checks
+        save.result(timeout=2)
+
+    assert changed.is_set() and settings.general.subfolder == 'relative'
+    assert destination.read_bytes() == pipeline.CONTENT
+    assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [1]
+
+
+@pytest.mark.parametrize('single,forced,suffix', [
+    (False, False, '.en'), (True, False, ''), (True, True, ''),
+], ids=['tagged', 'single-regular', 'single-forced'])
+def test_wanted_leaves_a_real_uploaded_language_sibling_before_upload_indexing(
+        world, monkeypatch, single, forced, suffix):
     import pysubs2
+    from app.config import settings
     from app.database import TableLanguagesProfiles, update_profile_id_list
     from media_sources import repository, wanted
     from subtitles import download, upload
+    from subzero.language import Language
 
-    world.db.execute(sa.update(TableLanguagesProfiles).values(originalFormat=1))
+    monkeypatch.setattr(settings.general, 'single_language', single)
+    profile = [{'id': 1, 'language': 'en', 'forced': str(forced), 'hi': 'False'}]
+    world.db.execute(sa.update(TableLanguagesProfiles).values(originalFormat=1, items=json.dumps(profile)))
     update_profile_id_list.invalidate()
     context = pipeline._movie(world)
-    sibling = Path(context.path).with_suffix('.en.ass')
+    sibling = Path(context.path).with_suffix(f'{suffix}.ass')
+    language_code = 'en:forced' if forced else 'en'
     content = pysubs2.SSAFile.from_string(pipeline.CONTENT.decode(), format_='srt').to_string('ass').encode()
     finish_upload = upload._finish_source_upload
     pending_finish = []
@@ -550,24 +603,26 @@ def test_wanted_leaves_a_real_uploaded_language_sibling_before_upload_indexing(w
     def download_best(videos, **kwargs):
         (found,) = videos
         result = upload.manual_upload_subtitle(
-            context.path, 'en', False, False, context.media_type, BytesIO(content), 'uploaded.ass', 'None',
+            context.path, 'en', forced, False, context.media_type, BytesIO(content), 'uploaded.ass', 'None',
             job_id=1, source=context)
         assert result == ('', 204)
         assert sibling.exists()
-        assert repository.get_item(context.item_id).missing_subtitles == "['en']"
-        return {found: [pipeline.FakeSubtitle()]}
+        assert repository.get_item(context.item_id).missing_subtitles == str([language_code])
+        return {found: [pipeline.FakeSubtitle(Language.rebuild(Language('eng'), forced=forced))]}
 
     monkeypatch.setattr(download, 'download_best_subtitles', download_best)
     wanted.wanted_search_missing_subtitles_sources(kind='movie', job_id=1)
 
     assert sibling.exists()
-    assert not Path(context.path).with_suffix('.en.srt').exists()
+    assert not Path(context.path).with_suffix(f'{suffix}.srt').exists()
     assert world.db.execute(sa.select(repository.History.c.id)).all() == []
     assert [event.operation for event in world.published] == ['upload']
     monkeypatch.setattr(upload, 'sync_subtitles', Mock())
     (finish_args,) = pending_finish
     finish_upload(*finish_args)
-    assert repository.get_item(context.item_id).missing_subtitles == '[]'
+    indexed = repository.get_item(context.item_id)
+    assert indexed.missing_subtitles == '[]'
+    assert [(code, path) for code, path, _ in ast.literal_eval(indexed.subtitles) if path] == [(language_code, str(sibling))]
     assert world.db.execute(sa.select(repository.History.c.action)).scalars().all() == [4]
 
 

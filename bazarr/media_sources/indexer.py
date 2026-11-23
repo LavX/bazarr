@@ -140,8 +140,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
 
     @staticmethod
     @contextmanager
-    def _keyed_settings_guard(shared):
-        if not shared:
+    def _keyed_settings_guard(pin):
+        if not pin:
             yield
             return
         with pin_subtitle_settings() as pinned:
@@ -191,7 +191,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             self._prepared_owners = None
             self._publication_settings = self._settings_snapshot()
             shared = self._needs_registry_guard(source, destination, self._publication_settings[0][1])
-            # Keyed mutations wait on their release before pinning shared-folder settings.
+            # Keyed mutations wait on their release before pinning destination settings.
             pin_settings = release is None
             if pin_settings:
                 with self._settings_guard():
@@ -213,7 +213,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                     settings_guard = self._settings_guard() if pin_settings else nullcontext()
                     with (settings_guard,
                           source_item_publication(source, shared=shared, **options) as (current, connection),
-                          self._keyed_settings_guard(shared and not pin_settings)):
+                          self._keyed_settings_guard(not pin_settings)):
                         if shared and current is not None and self._prepared_owners != self._registry_snapshot(connection):
                             break
                         if self._publication_settings != self._settings_snapshot():
@@ -538,6 +538,31 @@ def index_item(item_id, target=None, ownership_index=None, *, keep_index_on_prob
             if repository.write_item_index(item_id, str(listing), str(missing), connection, **values):
                 return listing
     return None
+
+
+def remember_single_language_upload(source, path, language, version):
+    """Preserve the language and variant omitted by a single-language filename."""
+    code = alpha2_from_alpha3(language.alpha3)
+    if not code or version is None:
+        return
+    code = normalize_subtitle_language_variant(code, forced=language.forced, hi=language.hi and not language.forced)
+    with source_transaction() as connection:
+        item = repository.get_item(source.item_id, connection, for_update=True)
+        if (item is None or not source.same_item(item)
+                or (item.path, item.source_id, item.library_id, item.kind) != (
+                    source.path, source.source_id, source.library_id, source.kind)
+                or regular_subtitle_version(path) != version):
+            return
+        try:
+            listing = ast.literal_eval(item.subtitles or '[]')
+        except (SyntaxError, ValueError):
+            logging.warning('BAZARR could not retain upload language for source item %s', source.item_id)
+            return
+        if not isinstance(listing, (list, tuple)) or any(not isinstance(entry, (list, tuple)) for entry in listing):
+            return
+        listing = [entry for entry in listing if len(entry) != 3 or entry[1] != path]
+        listing.append([code, path, version[2]])
+        repository.write_item_index(item.id, str(listing), item.missing_subtitles, connection, indexed=False)
 
 
 def _recoverable_index_database_error(error):

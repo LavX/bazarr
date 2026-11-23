@@ -244,6 +244,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                                 write_subtitle=writer)
                 saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
                 source_version = subtitle_source_version(saved_subtitles[0].storage_path) if saved_subtitles else None
+                if source is not None and single and source_version is not None:
+                    from media_sources.indexer import remember_single_language_upload
+
+                    saved = saved_subtitles[0]
+                    remember_single_language_upload(source, saved.storage_path, saved.language, source_version)
                 source_publication = (SubtitlePublication(path, saved_subtitles[0].storage_path, source_version,
                                                            **publication_options)
                                       if source_version is not None else None)
