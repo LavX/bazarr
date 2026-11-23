@@ -1,10 +1,11 @@
-import { FC, useState } from "react";
+import { FC, useRef, useState } from "react";
 import { Alert, Button, Group, Skeleton, Stack } from "@mantine/core";
 import { usePointersMutation } from "@/apis/hooks/translation";
 import { RestartBanner } from "@/components/hub/RestartBanner";
 import { StatusBadge } from "@/components/hub/StatusBadge";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
+import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import { OfficialMark } from "@/pages/Translation/EnginePanel";
 import {
   canRun,
@@ -80,7 +81,7 @@ const InstallAction: FC<{
  * Hub: it shows what the install adds and sends its digest. An engine the catalog does not list gets
  * its button disabled, with the reason beside it.
  */
-const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
+const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const state = useRestartAware();
   const pointers = usePointersMutation();
   const install = useEngineInstall(state.data);
@@ -88,6 +89,8 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   // A start that has saved the back end and not finished (the engine would not turn on, or could not be
   // selected) keeps the key form up, with the reason and the way to try again, as the page's first run does.
   const [pinned, setPinned] = useState(false);
+  const pinnedNow = useRef(false);
+  const [{ written }, patchDraft] = useStepDraft(stepKey, { written: false });
   // The shell holds Back, the skip and Set up later until a start has gone through: leaving in the
   // middle would drop the answer, and with it the reason a step failed.
   useReportStepBusy(starting || pointers.isPending || install.busy);
@@ -174,9 +177,12 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
               )}
             </Group>
             {saved ? (
-              // Something was saved, by this visit or an earlier one: that is an answer, though
-              // Continue writes nothing.
-              <Button onClick={() => onNext()} disabled={busy}>
+              // A start may have saved its back end before a later part failed.
+              // Otherwise this only keeps the configuration already present.
+              <Button
+                onClick={() => (written ? onNext() : onNext(NOTHING_WRITTEN))}
+                disabled={busy}
+              >
                 Continue
               </Button>
             ) : (
@@ -247,8 +253,17 @@ const TranslationStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
               keyOnlyTypes(official).length > 0 ? (
                 <KeyStart
                   engine={official}
-                  onPin={setPinned}
-                  onBusy={setStarting}
+                  onPin={(value) => {
+                    pinnedNow.current = value;
+                    setPinned(value);
+                  }}
+                  onBusy={(value) => {
+                    // KeyStart unpins a failed start only when no back end was saved.
+                    if (!value && pinnedNow.current) {
+                      patchDraft({ written: true });
+                    }
+                    setStarting(value);
+                  }}
                   locked={pointers.isPending}
                   // Setup has no set-up form to open: the Translation page has it, and the key
                   // is saved, so leaving is an answer.

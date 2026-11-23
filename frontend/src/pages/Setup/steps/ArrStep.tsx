@@ -13,6 +13,7 @@ import {
 import {
   getArrInstanceDeleteConflict,
   getArrInstanceErrorMessage,
+  isSettingsFollowupError,
   useArrInstances,
   useCreateArrInstance,
   useDeleteArrInstance,
@@ -187,6 +188,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
     port: meta.port as number | string,
     baseUrl: "",
     ssl: false,
+    written: false,
   });
   const { name, ip, port, baseUrl, ssl } = draft;
   const setName = (value: string) => patchDraft({ name: value });
@@ -304,10 +306,14 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       { [`settings-general-use_${kind}`]: true },
       {
         onSuccess: () => onNext(),
-        onError: () =>
+        onError: (error) => {
+          if (isSettingsFollowupError(error)) {
+            patchDraft({ written: true });
+          }
           setSaveError(
             `${meta.label} was saved, but Bazarr+ could not turn it on. Open Settings, Connections after setup and enable ${meta.label} there.`,
-          ),
+          );
+        },
       },
     );
   };
@@ -319,7 +325,10 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
         update.mutate(
           { id: existing.id, body: { enabled: true } },
           {
-            onSuccess: () => activate(),
+            onSuccess: () => {
+              patchDraft({ written: true });
+              activate();
+            },
             onError: (error) =>
               setSaveError(
                 getArrInstanceErrorMessage(
@@ -335,7 +344,11 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
         activate();
         return;
       }
-      onNext();
+      if (draft.written) {
+        onNext();
+      } else {
+        onNext(NOTHING_WRITTEN);
+      }
       return;
     }
     // The instance is already written, whatever the list says. Pressing
@@ -376,6 +389,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
     };
     create.mutate(body, {
       onSuccess: (created) => {
+        patchDraft({ written: true });
         setCreatedId(created.id);
         recordConnectionTest(connectionTestKey("arr", created.id), tested);
         activate();

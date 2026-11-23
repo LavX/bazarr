@@ -9,6 +9,7 @@ import {
   VisuallyHidden,
 } from "@mantine/core";
 import {
+  isSettingsFollowupError,
   useLanguageProfiles,
   useLanguages,
   useSettingsMutation,
@@ -129,10 +130,10 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     return code === undefined ? [] : [code];
   }, [languages]);
 
-  const [draft, patchDraft] = useStepDraft<{ selected: string[] | null }>(
-    stepKey,
-    { selected: null },
-  );
+  const [draft, patchDraft] = useStepDraft<{
+    selected: string[] | null;
+    written: boolean;
+  }>(stepKey, { selected: null, written: false });
   const selected = draft.selected ?? preselected;
   const setSelected = (next: string[]) => patchDraft({ selected: next });
   // What the last change to the selection did, said out loud. Measured with
@@ -190,13 +191,21 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
 
   const handleContinue = () => {
     if (profilesUnknown) {
-      // The profiles could not be read, so nothing is written and nothing is known.
-      onNext(NOTHING_WRITTEN);
+      // No new write is possible, but a confirmed earlier write still counts.
+      if (draft.written) {
+        onNext();
+      } else {
+        onNext(NOTHING_WRITTEN);
+      }
       return;
     }
     if (alreadyConfigured) {
-      // Profiles exist already, which is an answer.
-      onNext();
+      // Keeping an existing profile does not write an answer for this visit.
+      if (draft.written) {
+        onNext();
+      } else {
+        onNext(NOTHING_WRITTEN);
+      }
       return;
     }
 
@@ -238,7 +247,12 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         onSuccess: () => {
           onNext();
         },
-        onError: () => setSaveFailed(true),
+        onError: (error) => {
+          if (isSettingsFollowupError(error)) {
+            patchDraft({ written: true });
+          }
+          setSaveFailed(true);
+        },
       },
     );
   };

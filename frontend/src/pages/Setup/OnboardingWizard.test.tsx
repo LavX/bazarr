@@ -1204,6 +1204,92 @@ describe("the rail, visited and completed", () => {
     );
   });
 
+  it("keeps Subtitles visited when Continue leaves an existing profile unchanged", async () => {
+    server.use(
+      http.get("/api/system/media-server-instances", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get("/api/provider-hub/providers", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get("/api/provider-hub/catalog", () =>
+        HttpResponse.json({ sources: [], entries: [] }),
+      ),
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { code2: "en", code3: "eng", name: "English", enabled: true },
+        ]),
+      ),
+      http.get("/api/system/languages/profiles", () =>
+        HttpResponse.json([
+          {
+            name: "English",
+            profileId: 1,
+            cutoff: null,
+            items: [
+              {
+                id: 1,
+                language: "en",
+                /* eslint-disable camelcase */
+                audio_exclude: "False",
+                audio_only_include: "False",
+                forced: "False",
+                hi: "False",
+                translate_from: null,
+                /* eslint-enable camelcase */
+              },
+            ],
+            mustContain: [],
+            mustNotContain: [],
+            originalFormat: false,
+          },
+        ]),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await user.click(
+      await screen.findByRole("radio", {
+        name: /find subtitles for anything/i,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /continue without requests/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+    const continueLanguages = screen.getByRole("button", {
+      name: /^continue$/i,
+    });
+    await waitFor(() => expect(continueLanguages).toBeEnabled());
+    await user.click(continueLanguages);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /i will pick providers later/i,
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: /continue without translation/i,
+      }),
+    );
+    await screen.findByRole("heading", { name: /general basics/i });
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(checks()).toHaveLength(1);
+    expect(dotFor("3")).toHaveClass(wizardStyles.dotSkipped);
+    expect(dotFor("3")).not.toHaveClass(wizardStyles.dotDone);
+    expect(rail()).toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped: Connect, Subtitles"),
+    );
+  });
+
   it("counts a step as answered once its Continue wrote something", async () => {
     const user = userEvent.setup();
     writeLandsAtOnce();

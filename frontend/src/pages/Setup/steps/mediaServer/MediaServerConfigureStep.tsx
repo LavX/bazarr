@@ -1,6 +1,9 @@
 import { FC } from "react";
 import StepLayout from "@/pages/Setup/StepLayout";
-import type { WizardStepProps } from "@/pages/Setup/steps/types";
+import {
+  NOTHING_WRITTEN,
+  type WizardStepProps,
+} from "@/pages/Setup/steps/types";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import InstanceServerForm from "./InstanceServerForm";
 import PlexServerForm from "./PlexServerForm";
@@ -29,7 +32,9 @@ const MediaServerConfigureStep: FC<Props> = ({ draftId, onNext, onBack }) => {
         title="Media server"
         titleOrder={3}
         description="This server is no longer selected."
-        actions={<StepActions onNext={onNext} onBack={onBack} />}
+        actions={
+          <StepActions onNext={() => onNext(NOTHING_WRITTEN)} onBack={onBack} />
+        }
       />
     );
   }

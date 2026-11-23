@@ -35,6 +35,8 @@ interface Props {
   /** Whether this kind's master switch is on. Off means nothing refreshes. */
   kindEnabled?: boolean;
   onDisconnected: (instanceId: string) => void;
+  onBusyChange?: (busy: boolean) => void;
+  onWritten?: () => void;
 }
 
 /**
@@ -62,6 +64,8 @@ const ConnectedServerRow: FC<Props> = ({
   ownershipPending = false,
   kindEnabled = true,
   onDisconnected,
+  onBusyChange,
+  onWritten,
 }) => {
   const [confirming, setConfirming] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -132,8 +136,9 @@ const ConnectedServerRow: FC<Props> = ({
   const disconnect = () => {
     setFailed(false);
     enabledBefore.current = kindEnabled;
+    onBusyChange?.(true);
     if (!accountOwned) {
-      void deleteRow();
+      void deleteRow().finally(() => onBusyChange?.(false));
       return;
     }
     // Sign out first: once the credential is gone nothing can rebuild the row,
@@ -141,8 +146,12 @@ const ConnectedServerRow: FC<Props> = ({
     // rather than a connected one.
     void logout
       .mutateAsync(undefined)
-      .then(() => deleteRow())
-      .catch(() => setFailed(true));
+      .then(() => {
+        onWritten?.();
+        return deleteRow();
+      })
+      .catch(() => setFailed(true))
+      .finally(() => onBusyChange?.(false));
   };
 
   return (

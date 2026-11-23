@@ -788,9 +788,9 @@ describe("TranslationStep", () => {
       screen.queryByRole("button", { name: "Continue without translation" }),
     ).not.toBeInTheDocument();
 
-    // Set up earlier is an answer: nothing is passed, and nothing is sent.
+    // Keeping the configuration already present writes nothing.
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(onNext).toHaveBeenCalledWith();
+    expect(onNext).toHaveBeenCalledWith(NOTHING_WRITTEN);
     expect(calls).toEqual([]);
   });
 
