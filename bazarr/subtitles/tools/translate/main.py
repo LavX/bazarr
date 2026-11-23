@@ -8,7 +8,8 @@ from threading import RLock
 
 from .core.translator_utils import (validate_translation_params, convert_language_codes, get_title,
                                     SourceTranslationChanged, SourceTranslationInputAmbiguous,
-                                    translated_destination_path, validate_source_translation)
+                                    source_translation_video_version, translated_destination_path,
+                                    validate_source_translation)
 from . import pick as _pick
 from .availability import runtime_active as _runtime_active, translation_available
 from .failure_record import clear_failed_translation, record_failed_translation
@@ -344,6 +345,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
         if source is not None:
+            video_version = source_translation_video_version(video_path)
             destination = translated_destination_path(video_path, to_lang, forced, hi)
             source = validate_source_translation(source, video_path, source_srt_file, destination, from_lang,
                                                  to_lang, forced, hi, expected_destination_versions)
@@ -404,7 +406,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             arr_instance_id=arr_instance_id,
             expected_destination_versions=expected_destination_versions,
             **({'sports_operation': sports_operation, 'cancel': cancel} if sports_operation else {}),
-            **({'source': source} if source is not None else {}),
+            **({'source': source, 'source_video_version': video_version} if source is not None else {}),
         )
         if runtime_on:
             # The selected engine of the runtime, with its failover, fallback and checkpoints, replaces the

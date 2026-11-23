@@ -31,7 +31,8 @@ from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, Subtitl
                                              validate_subtitle_versions)
 
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
-                                     record_source_translation, require_source_translation, translation_write_kwargs)
+                                     record_source_translation, require_source_translation,
+                                     source_translation_video_version, translation_write_kwargs)
 from .failure import MESSAGES
 from .dispatch import DispatchFailed, Dispatcher, JobSpec, LegacyDeclined, LegacyResult
 from .jobs import line_digest, target_key
@@ -107,7 +108,7 @@ class RuntimeTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type, video_path,
                  orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id, radarr_id, arr_instance_id=None,
                  sports_operation=None, cancel=None, expected_destination_versions=(), source_key=None,
-                 dispatcher=None, source=None):
+                 dispatcher=None, source=None, source_video_version=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -124,6 +125,7 @@ class RuntimeTranslatorService:
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
         self.source = source
+        self.source_video_version = source_video_version
         self.cancel = cancel
         self.expected_destination_versions = tuple(expected_destination_versions or ())
         self.source_key = source_key or str(source_srt_file)
@@ -156,7 +158,8 @@ class RuntimeTranslatorService:
             radarr_id=self.radarr_id, arr_instance_id=self.arr_instance_id,
             expected_destination_versions=self.expected_destination_versions,
             **({"sports_operation": self.sports_operation, "cancel": self.cancel} if self.sports_operation else {}),
-            **({"source": self.source} if self.source is not None else {}))
+            **({"source": self.source, "source_video_version": self.source_video_version}
+               if self.source is not None else {}))
         try:
             published = service.translate(job_id=self._job_id)
         except Exception as error:
@@ -168,6 +171,8 @@ class RuntimeTranslatorService:
 
     def translate(self, job_id=None):
         self._job_id = job_id
+        if self.source is not None and self.source_video_version is None:
+            self.source_video_version = source_translation_video_version(self.video_path)
         if os.path.islink(self.dest_srt_file):
             # Refused before anything is paid for: a translation replaces the file at the destination, and a
             # link there is not something Bazarr+ replaces. It would never publish, so it is not retried.
