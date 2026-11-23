@@ -86,7 +86,7 @@ def _already_selected(row, candidate_id):
     return row.identity_source == 'user' and row.tmdb_id == str(candidate_id)
 
 
-def override_identity(row_id, body, *, group=False):
+def override_identity(row_id, body, *, group=False, expected_kind=None):
     getter = repository.get_group if group else repository.get_item
     if not isinstance(body, dict) or not body:
         raise SourceError('Provide a JSON object with an identity correction.')
@@ -96,7 +96,7 @@ def override_identity(row_id, body, *, group=False):
         if len(body) != 1 or type(candidate_id) is not int or candidate_id < 1:
             raise SourceError('Select one TMDB candidate or enter its identity by hand.')
         current = getter(row_id)
-        if current is None:
+        if current is None or (expected_kind is not None and current.kind != expected_kind):
             raise SourceError('No such source item or group.', 404, 'not_found')
         if current.kind not in ('movie', 'show'):
             raise SourceError('This item does not have a TMDB candidate list.')
@@ -111,7 +111,7 @@ def override_identity(row_id, body, *, group=False):
         if previous is not None and previous.kind == 'episode':
             repository.get_group(previous.group_id, connection, for_update=True)
         row = getter(row_id, connection, for_update=True)
-        if row is None:
+        if row is None or (expected_kind is not None and row.kind != expected_kind):
             raise SourceError('No such source item or group.', 404, 'not_found')
         if row.kind == 'episode' and (previous is None or row.group_id != previous.group_id):
             raise SourceError('The episode moved during the identity correction. Try again.', 409, 'conflict')

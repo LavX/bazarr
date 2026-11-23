@@ -151,6 +151,79 @@ def _events(session, root, *, name='Local Sports'):
     return source, league, dated, round_id
 
 
+def test_leagues_union_keeps_legacy_owners_and_scopes_group_events(client, arr_library, tmp_path, monkeypatch):
+    import sqlalchemy as sa
+    from app.config import settings
+    from app.database import TableArrInstances, TableSportsLeagues
+    from media_source_helpers import add_item
+    from media_sources import repository
+
+    arr_library.execute(sa.insert(TableArrInstances).values(
+        id=4, kind='sportarr', name='Other Sportarr', stable_key='sportarr-secondary', port=9004,
+        enabled=1, is_default=0, path_mappings='[]'))
+    arr_library.execute(sa.insert(TableSportsLeagues).values(
+        id=2, arr_instance_id=4, sportarrLeagueId=31, title='Other League', sortTitle='other league',
+        monitored='True', path='/other/league'))
+
+    def get(route, **query):
+        response = client.get('/api/' + route, query_string=query, headers=HEADERS)
+        assert response.status_code == 200, response.get_json()
+        return response
+
+    baseline = get('sports/leagues').data
+    assert get('sports/leagues', sources=1).data == baseline
+    assert [row['id'] for row in get('sports/leagues', **{'source_key[]': 'arr:4'}).json['data']] == [2]
+    for route in ('wanted', 'history', 'blacklist'):
+        assert get(f'sports/{route}', **{'source_key[]': 'arr:3'}).json['total'] == 1
+        assert get(f'sports/{route}', **{'source_key[]': 'arr:4'}).json['data'] == []
+        assert get(f'sports/{route}', arr_instance_id=3, **{'source_key[]': 'arr:4'}).json['data'] == []
+
+    owner, league, dated, round_id = _events(arr_library, tmp_path)
+    group = repository.get_group(league, arr_library)
+    repository.update_item(dated, arr_library, audio_language="['Hungarian', 'Hungarian']")
+    repository.update_item(round_id, arr_library, audio_language="['English']")
+    early = add_item(arr_library, owner, group.library_id, video(tmp_path / 'earlier.mkv'),
+                     kind='sports_event', group_id=league, title='Earlier Race', event_date='2026-01-01', season=2026)
+    unknown = add_item(arr_library, owner, group.library_id, video(tmp_path / 'unknown.mkv'),
+                       kind='sports_event', group_id=league, title='Unknown Race')
+    other_owner, other_league, _, _ = _events(arr_library, tmp_path, name='Other Folder')
+    other_library = repository.get_group(other_league, arr_library).library_id
+    add_item(arr_library, other_owner, other_library, video(tmp_path / 'foreign.mkv'),
+             kind='sports_event', group_id=league, title='Foreign Race')
+    assert get('sports/leagues').data == baseline
+    mixed = get('sports/leagues', sources=1, length=1).json
+    assert mixed['total'] == 4
+    full = get('sports/leagues', sources=1, length=-1).json['data']
+    assert ('arr', 1) in {(row['origin'], row['id']) for row in full}
+    assert ('source', league) in {(row['origin'], row['id']) for row in full}
+    scoped = get('sports/leagues', sources=1, **{'source_key[]': f'source:{owner}'}).json['data']
+    assert len(scoped) == 1 and scoped[0]['source_key'] == f'source:{owner}'
+    assert scoped[0]['eventFileCount'] == 4
+    assert scoped[0]['audio_language'] == ['English', 'Hungarian']
+    assert get('system/languages/audio').json == []
+    assert {language['code2'] for language in get('system/languages/audio', sources=1).json} == {'en', 'hu'}
+    assert get('sports/leagues', sources=1, arr_instance_id=3, **{'source_key[]': 'arr:4'}).json['data'] == []
+
+    events = get(f'sources/groups/{league}/items').json['data']
+    assert [item['id'] for item in events] == [early, dated, round_id, unknown]
+    assert all(item['kind'] == 'sports_event' and item['group_id'] == league for item in events)
+    assert get(f'sources/groups/{league}', kind='league').json['title'] == 'Z Local League'
+    for url in (f'/api/sources/groups/{league}/items', '/api/system/searches?query=local&sources=1'):
+        assert client.get(url).status_code == 401
+    assert client.get(f'/api/sources/groups/{league}?kind=show', headers=HEADERS).status_code == 404
+    monkeypatch.setattr('api.sources.items.delete_subtitles', lambda *_, **__: pytest.fail('Wrong-owner delete'))
+    exclude = client.post(f'/api/sources/items/{dated}/blacklist', headers=HEADERS, data={
+        'source_id': other_owner, 'subtitles_path': '/fixture/race.en.srt', 'provider': 'fixture',
+        'language': 'en', 'subs_id': 'recorded-release',
+    })
+    assert exclude.status_code == 409
+    hits = get('system/searches', sources=1, query='local league').json
+    assert {hit['detail_url'] for hit in hits} == {f'/sports/source/{row["id"]}' for row in full
+                                                   if row['origin'] == 'source'}
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    assert all(row['origin'] == 'source' for row in get('sports/leagues', sources=1).json['data'])
+
+
 def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_library, tmp_path, monkeypatch):
     from datetime import datetime
     from unittest.mock import Mock
@@ -169,7 +242,7 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
 
     previous = {endpoint: get(endpoint).data for endpoint in endpoints}
     assert {endpoint: get(endpoint, sources=1).data for endpoint in endpoints} == previous
-    ownerless = client.delete('/api/sports/blacklist?sources=1', headers=HEADERS)
+    ownerless = client.delete('/api/sports/blacklist', headers=HEADERS)
     assert ownerless.status_code == 400
     assert get('blacklist').data == previous['blacklist']
     owner, league, dated, round_id = _events(arr_library, tmp_path)
@@ -209,8 +282,10 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
     assert rows_after[0]['source_item_id'] is None and rows_after[0]['source_group_id'] is None
     assert rows_after[0]['title'] == 'Championship'
     assert rows_after[0]['video_path'] == '/retained/Championship.mkv'
+    removal_key = next(row['removal_key'] for row in rows_after if row['id'] == rows[dated]
+                       and row['origin'] == 'source')
     response = client.delete(f'/api/sports/blacklist/{rows[dated]}', headers=HEADERS,
-                             query_string={'sources': 1, 'origin': 'source'})
+                             query_string={'sources': 1, 'origin': 'source', 'source_blacklist_key': removal_key})
     assert response.status_code == 200 and response.get_json() == {'removed': True}
     assert arr_library.scalar(sa.select(sa.func.count()).select_from(TableBlacklistSports)) == 1
     response = client.delete('/api/sports/blacklist', headers=HEADERS,
@@ -225,6 +300,8 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
     detached = get('blacklist', sources=1, **{'source_key[]': 'source:removed'}).get_json()['data']
     assert len(detached) == 1 and detached[0]['source_name'] == 'Removed Sports'
     assert detached[0]['source_item_id'] is None and detached[0]['source_group_id'] is None
+    availability = client.get('/api/system/media-sources?availability=1', headers=HEADERS).json['availability']
+    assert availability['sports'] == {'browsable': True, 'searchable': True, 'retained': True, 'removed': True}
 
     from media_sources.context import resolve_item
     from media_sources.history import blacklist_log_source
@@ -242,6 +319,221 @@ def test_sports_activity_unions_keep_legacy_shape_filter_and_page(client, arr_li
     arr_library.execute(sa.delete(repository.Items).where(repository.Items.c.id == dated))
     retained = get('blacklist', sources=1, **{'source_key[]': f'source:{owner}'}).get_json()['data']
     assert len(retained) == 1 and retained[0]['title'] == 'Race Day Race'
+
+
+@pytest.mark.parametrize('master,primary_enabled,secondary_enabled,expected_status,remaining', [
+    (True, True, True, 200, [5]),
+    (True, True, False, 200, [4, 5]),
+    (True, False, False, 400, [3, 4, 5]),
+    (False, True, True, 400, [3, 4, 5]),
+])
+def test_unfiltered_clear_after_last_retained_source_exclusion_keeps_native_owner_guards(
+        client, arr_library, tmp_path, monkeypatch, master, primary_enabled, secondary_enabled,
+        expected_status, remaining):
+    import sqlalchemy as sa
+    from app.config import settings
+    from app.database import TableArrInstances, TableBlacklistSports, TableSportsEvents, TableSportsLeagues
+    from media_sources import repository
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
+    monkeypatch.setattr(settings.general, 'use_sportarr', master)
+    arr_library.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 3).values(
+        enabled=int(primary_enabled), is_default=int(primary_enabled)))
+    for owner, enabled in ((4, secondary_enabled), (5, False)):
+        arr_library.execute(sa.insert(TableArrInstances).values(
+            id=owner, kind='sportarr', name=f'Sportarr {owner}', stable_key=f'sportarr-{owner}',
+            enabled=int(enabled), is_default=0, port=9000 + owner, path_mappings='[]'))
+        arr_library.execute(sa.insert(TableSportsLeagues).values(
+            id=owner, arr_instance_id=owner, sportarrLeagueId=31, title=f'League {owner}', monitored='True'))
+        arr_library.execute(sa.insert(TableSportsEvents).values(
+            id=owner, arr_instance_id=owner, league_id=owner, sportarrEventId=41, file_id=51,
+            path=f'/sports/{owner}.mkv', title='Final', monitored='True'))
+        arr_library.execute(sa.insert(TableBlacklistSports).values(
+            id=owner, arr_instance_id=owner, league_id=owner, event_id=owner, provider='alpha', subs_id='release',
+            language='en'))
+    source, _, _ = add_source(arr_library, tmp_path, content_kind='movie')
+    repository.insert_blacklist(arr_library, source_id=source, item_kind='sports_event', source_name='Former Sports')
+
+    def clear(**scope):
+        return client.delete('/api/sports/blacklist', headers=HEADERS, query_string={'sources': 1, **scope})
+
+    response = clear(**{'source_key[]': f'source:{source}'})
+    assert response.status_code == 200 and response.json == {'removed': 1}
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.History)) == 0
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Libraries).where(
+        repository.Libraries.c.content_kind == 'sports')) == 0
+    for key in (f'source:{source}', 'source:removed'):
+        response = clear(**{'source_key[]': key})
+        assert response.status_code == 200 and response.json == {'removed': 0}
+        assert arr_library.scalars(sa.select(TableBlacklistSports.arr_instance_id).order_by(
+            TableBlacklistSports.arr_instance_id)).all() == [3, 4, 5]
+
+    response = clear()
+    assert response.status_code == expected_status, response.json
+    if expected_status == 200:
+        assert response.json == {'removed': 3 - len(remaining)}
+    assert arr_library.scalars(sa.select(TableBlacklistSports.arr_instance_id).order_by(
+        TableBlacklistSports.arr_instance_id)).all() == remaining
+
+
+def test_source_sports_history_exclusion_preserves_a_replacement_subtitle(client, arr_library, tmp_path, monkeypatch):
+    import sqlalchemy as sa
+    from media_sources import repository
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
+    owner, _, event, _ = _events(arr_library, tmp_path)
+    other, _, _, _ = _events(arr_library, tmp_path, name='Other Folder')
+    item = repository.get_item(event)
+    saved = Path(item.path).with_suffix('.en.srt')
+    saved.write_bytes(pipeline.CONTENT)
+    repository.update_item(event, arr_library, subtitles=repr([('en', str(saved), 75)]))
+    history_id = repository.insert_history(
+        arr_library, item_id=event, source_id=owner, item_kind='sports_event', action=1, description='Downloaded',
+        provider='fixture', language='en', subs_id='first-release', video_path=item.path, subtitles_path=str(saved),
+        item_title='Recorded title', group_title='Recorded league', source_name='Recorded owner')
+    repository.insert_history(
+        arr_library, item_id=event, source_id=owner, item_kind='sports_event', action=4, description='Uploaded',
+        language='en', video_path=item.path, subtitles_path=str(saved))
+    url = f'/api/sports/history/{history_id}/blacklist'
+    query = {'sources': 1, 'origin': 'source'}
+    payload = {'source_id': owner, 'source_item_id': event, 'language': 'en',
+               'provider': 'fixture', 'subs_id': 'first-release'}
+
+    def post(body, params=query):
+        return client.post(url, headers=HEADERS, json=body, query_string=params)
+
+    assert client.post(url, json=payload, query_string=query).status_code == 401
+    assert post(payload | {'source_id': other}).status_code == 409
+    assert post(payload | {'subs_id': 'different-release'}).status_code == 409
+    assert post(payload, {'origin': 'source'}).status_code == 400
+    assert post(payload | {'arr_instance_id': 3}).status_code == 400
+    assert post(payload).status_code == 204
+    assert post(payload).status_code == 204
+    (excluded,) = arr_library.execute(sa.select(repository.Blacklist)).all()
+    assert (excluded.source_id, excluded.item_id, excluded.subs_id, excluded.item_title) == (
+        owner, event, 'first-release', 'Recorded title')
+    assert saved.read_bytes() == pipeline.CONTENT
+    assert repository.get_item(event).subtitles == repr([('en', str(saved), 75)])
+    assert list(arr_library.scalars(sa.select(repository.History.c.action).order_by(repository.History.c.id))) == [1, 4]
+    mixed = client.get('/api/sports/blacklist?sources=1', headers=HEADERS).json['data']
+    assert {(row['origin'], row['subs_id']) for row in mixed} == {('arr', 'sp1'), ('source', 'first-release')}
+
+
+@pytest.mark.parametrize('topology', ['library', 'retained_owner', 'removed_owner'])
+def test_unfiltered_sports_bulk_can_clear_arr_when_a_source_has_no_exclusions(
+        client, arr_library, tmp_path, monkeypatch, topology):
+    from media_sources import repository, service
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, 'refresh_tasks', lambda: None)
+    owner, _, event_id, _ = _events(arr_library, tmp_path)
+    if topology != 'library':
+        item = repository.get_item(event_id)
+        history_id = repository.insert_history(
+            arr_library, item_id=event_id, source_id=owner, item_kind='sports_event',
+            action=1, description='Previously downloaded', item_title=item.title)
+        base = f'/api/system/media-sources/{owner}'
+        endpoint = f'{base}/libraries/{item.library_id}' if topology == 'retained_owner' else base
+        assert client.delete(endpoint, headers=HEADERS).status_code == 204
+    response = client.delete('/api/sports/blacklist?sources=1', headers=HEADERS)
+    assert response.status_code == 200 and response.json == {'removed': 1}
+    assert client.get('/api/sports/blacklist', headers=HEADERS).json['total'] == 0
+    if topology != 'library':
+        rows = client.get('/api/sports/history?sources=1', headers=HEADERS).json['data']
+        (retained,) = [row for row in rows if row['origin'] == 'source']
+        assert retained['id'] == history_id and retained['source_item_id'] is None
+        assert retained['source_id'] == (owner if topology == 'retained_owner' else None)
+
+
+def test_last_sports_library_removal_retains_its_source_scope(client, arr_library, tmp_path, monkeypatch):
+    from app.config import settings
+    from media_sources import repository, service
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, 'refresh_tasks', lambda: None)
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    owner, _, event, _ = _events(arr_library, tmp_path, name='Former Sports')
+    current, _, current_event, _ = _events(arr_library, tmp_path, name='Active Sports')
+    library_id = repository.get_item(event).library_id
+    repository.create_library(
+        source_id=owner, content_kind='movie', locator=str(tmp_path / 'movies'), target=arr_library)
+    for source_id, item_id, title in ((owner, event, 'Former final'), (current, current_event, 'Active final')):
+        values = dict(source_id=source_id, item_id=item_id, item_kind='sports_event',
+                      item_title=title, provider='fixture', subs_id=title, language='en')
+        repository.insert_history(arr_library, action=1, description='Downloaded', **values)
+        repository.insert_blacklist(arr_library, **values)
+
+    catalogue = '/api/system/media-sources?availability=1'
+    assert 'retained_source_ids' not in client.get(catalogue, headers=HEADERS).json['availability']['sports']
+    response = client.delete(f'/api/system/media-sources/{owner}/libraries/{library_id}', headers=HEADERS)
+    assert response.status_code == 204
+    payload = client.get(catalogue, headers=HEADERS).json
+    assert payload['availability']['sports'] == {
+        'browsable': True, 'searchable': True, 'retained': True, 'retained_source_ids': [owner],
+    }
+    former = next(source for source in payload['data'] if source['id'] == owner)
+    assert [library['content_kind'] for library in former['libraries']] == ['movie']
+
+    for endpoint in ('history', 'blacklist'):
+        url = f'/api/sports/{endpoint}'
+        mixed = client.get(url, headers=HEADERS, query_string={
+            'sources': 1, 'source_key[]': [f'source:{owner}', f'source:{current}'],
+        }).json['data']
+        assert {row['source_key'] for row in mixed} == {f'source:{owner}', f'source:{current}'}
+        scoped = client.get(url, headers=HEADERS, query_string={
+            'sources': 1, 'source_key[]': f'source:{owner}',
+        }).json['data']
+        assert len(scoped) == 1 and scoped[0]['source_id'] == owner
+        assert scoped[0]['title'] == 'Former final' and scoped[0]['source_item_id'] is None
+    clear = client.delete('/api/sports/blacklist', headers=HEADERS, query_string={
+        'sources': 1, 'source_key[]': f'source:{owner}',
+    })
+    assert clear.status_code == 200 and clear.json == {'removed': 1}
+    rows = client.get('/api/sports/blacklist?sources=1', headers=HEADERS).json['data']
+    assert [row['source_id'] for row in rows] == [current]
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    assert client.get('/api/sports/blacklist', headers=HEADERS).json['total'] == 1
+
+
+def test_sports_exclusion_removal_keeps_a_replacement_for_another_source(client, arr_library, tmp_path, monkeypatch):
+    import sqlalchemy as sa
+    from media_sources import repository
+
+    monkeypatch.setattr('app.event_handler.socketio.emit', lambda *args, **kwargs: None)
+    first, _, first_event, _ = _events(arr_library, tmp_path)
+    second, _, second_event, _ = _events(arr_library, tmp_path, name='Other Source')
+    blacklist = repository.Blacklist
+    root_url = '/api/sports/blacklist'
+    native = client.get(root_url, headers=HEADERS).data
+
+    def listed():
+        return next(row for row in client.get(root_url, headers=HEADERS, query_string={'sources': 1}).json['data']
+                    if row['origin'] == 'source')
+
+    def remove(row):
+        return client.delete(f'{root_url}/{row["id"]}', headers=HEADERS, query_string={
+            'sources': 1, 'origin': 'source', 'source_blacklist_key': row['removal_key'],
+        })
+
+    old_id = repository.insert_blacklist(
+        arr_library, item_kind='sports_event', source_id=first, item_id=first_event, subs_id='original')
+    stale = listed()
+    missing = client.delete(f'{root_url}/{old_id}', headers=HEADERS, query_string={'sources': 1, 'origin': 'source'})
+    assert missing.status_code == 400
+    assert remove(stale).status_code == 200
+    # SQLite naturally reuses the highest deleted ID. Force the same case on PostgreSQL.
+    identity = {} if arr_library.get_bind().dialect.name == 'sqlite' else {'id': old_id}
+    replacement_id = repository.insert_blacklist(
+        arr_library, item_kind='sports_event', source_id=second, item_id=second_event, subs_id='replacement', **identity)
+    assert replacement_id == old_id
+    current = listed()
+    assert stale['removal_key'] != current['removal_key']
+    assert remove(stale).status_code == 409
+    assert arr_library.scalar(sa.select(blacklist.c.source_id)) == second
+    assert remove(current).status_code == 200
+    assert arr_library.execute(sa.select(blacklist)).first() is None
+    assert client.get(root_url, headers=HEADERS).data == native
 
 
 def test_source_only_sports_badge_and_search_do_not_require_a_sportarr_owner(
@@ -289,6 +581,67 @@ def test_sports_item_override_controls_provider_identity(client, arr_library, tm
     assert (context.title, context.year) == ('Test Grand Prix Qualifying', 2027)
     for patch in ({'event_date': '2026-02-29'}, {'round': None}, {'candidate_id': 65536}):
         assert client.patch(f'/api/sources/items/{round_id}', headers=HEADERS, json=patch).status_code == 400
+
+
+@pytest.mark.parametrize('profileless', [False, True], ids=['profiled', 'enabled-languages'])
+def test_source_event_manual_download_upload_and_delete_keep_sports_owners_separate(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, profileless):
+    from io import BytesIO
+
+    import sqlalchemy as sa
+    from app.config import settings
+    from app.database import TableHistorySports, TableSettingsLanguages
+    from media_sources import repository
+    from media_sources.context import resolve_item
+    from subtitles import manual
+
+    owner, _, dated, _ = _events(arr_library, tmp_path)
+    if profileless:
+        repository.update_library(repository.get_item(dated).library_id, arr_library, profile_id=None)
+        repository.update_item(dated, arr_library, identity_state='unmatched')
+        arr_library.execute(sa.insert(TableSettingsLanguages).values(
+            code2='en', code3='eng', name='English', enabled=1))
+    source = resolve_item(dated)
+    assert (source.profile_id is None) is profileless
+    saved = Path(source.path).with_suffix('.en.srt')
+    base = f'/api/sources/items/{dated}'
+    native_url = '/api/sports/history'
+    native_history = client.get(native_url, headers=HEADERS).data
+    monkeypatch.setattr(settings.general, 'minimum_score_sports', 0)
+    payload, _ = manual_tests._search_for_download(client, monkeypatch, source)
+    monkeypatch.setattr(manual, 'download_subtitles', lambda *args, **kwargs: None)
+
+    def finish(response):
+        assert response.status_code == 202, response.get_json()
+        job = isolated_jobs._reserve_next_job()
+        assert job.job_id == response.get_json()['job_id']
+        assert isolated_jobs._run_job(job), job.error
+
+    def delete():
+        response = client.delete(f'{base}/subtitles', headers=HEADERS, json={
+            'subtitles_path': str(saved), 'language': 'en',
+        })
+        assert response.status_code == 204
+        assert not saved.exists()
+
+    finish(client.post(f'{base}/manual', headers=HEADERS, json=payload))
+    assert saved.read_bytes() == pipeline.CONTENT
+    delete()
+    finish(client.post(f'{base}/subtitles', headers=HEADERS, data={
+        'file': (BytesIO(pipeline.CONTENT), 'fixture.srt'), 'language': 'en', 'forced': 'False', 'hi': 'False',
+    }))
+    assert saved.is_file()
+    assert repository.get_item(dated).missing_subtitles == '[]'
+    delete()
+    assert ('en' in repository.get_item(dated).missing_subtitles) is not profileless
+
+    rows = arr_library.execute(sa.select(repository.History).order_by(repository.History.c.id)).all()
+    assert [(row.action, row.item_kind, row.item_id, row.source_id) for row in rows] == [
+        (action, 'sports_event', dated, owner) for action in (2, 0, 4, 0)]
+    assert [(event.media_type, event.operation, event.arr_instance_id, event.source_item_id) for event in writes] == [
+        ('sports', operation, None, dated) for operation in ('download', 'delete', 'upload', 'delete')]
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(TableHistorySports)) == 1
+    assert client.get(native_url, headers=HEADERS).data == native_history
 
 
 def test_scanned_events_reach_the_sports_threshold_and_publish_through_the_source_pool(

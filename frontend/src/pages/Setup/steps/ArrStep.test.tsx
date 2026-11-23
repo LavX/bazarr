@@ -1057,7 +1057,7 @@ describe("ArrStep", () => {
       screen.getByRole("button", { name: /remove typo sonarr/i }),
     );
 
-    expect(deleteMutate).toHaveBeenCalledWith({ id: 7 });
+    expect(deleteMutate).toHaveBeenCalledWith({ id: 7, kind: "sonarr" });
   });
 
   it("points a refused remove of a synced instance to Settings, Connections", async () => {

@@ -15,7 +15,6 @@ import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faArrowUp,
   faBookmark,
-  faCheck,
   faCircleDown,
   faEllipsisVertical,
   faFileExport,
@@ -28,26 +27,26 @@ import {
   faStop,
   faSync,
   faToolbox,
-  faUndo,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
-import { uniqBy } from "lodash";
-import {
-  useSeriesModification,
-  useSeriesPagination,
-  useSystemSettings,
-} from "@/apis/hooks";
-import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { useSeriesModification, useSystemSettings } from "@/apis/hooks";
+import { useSeriesLibrary } from "@/apis/hooks/library";
 import { useAppTitle } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
+import {
+  getLibraryOwnerKey,
+  getLibraryRowKey,
+  libraryItemPath,
+  LibraryRow,
+} from "@/apis/raw/library";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList, InstanceBadge, ScorePill } from "@/components/bazarr";
+import { AudioList, ScorePill } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
+import SourceBadge from "@/components/bazarr/SourceBadge";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
-import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MassCombineModal } from "@/components/forms/MassCombineForm";
 import { MassSyncModal } from "@/components/forms/MassSyncForm";
@@ -62,7 +61,11 @@ import ItemView, {
   SubtitlesFilter,
   SubtitlesStatus,
 } from "@/pages/views/ItemView";
-import { GetItemId } from "@/utilities";
+import {
+  LibrarySourceRowActions,
+  LibrarySourceSelectionActions,
+} from "@/pages/views/LibrarySourceActions";
+import { useLibraryProfileEdit } from "@/pages/views/useLibraryProfileEdit";
 
 function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
   return `${upstreamId}:${arrInstanceId ?? ""}`;
@@ -78,14 +81,7 @@ const SeriesView: FunctionComponent = () => {
   const [subtitlesFilter, setSubtitlesFilter] =
     useState<SubtitlesFilter>("any");
   const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("any");
-  const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
   const [tagFilter, setTagFilter] = useState<string[]>([]);
-  const {
-    multiInstance,
-    nameById: instanceNameById,
-    defaultId: instanceDefaultId,
-    options: instanceOptions,
-  } = useArrInstanceLabels("sonarr");
 
   // The acceptance threshold that labels the "below threshold" score group and
   // drives it; undefined until settings load. Series use the episode minimum.
@@ -93,17 +89,17 @@ const SeriesView: FunctionComponent = () => {
   const scoreThreshold = settings?.general.minimum_score;
 
   const scoreValue = useCallback(
-    (series: Item.Series) => series.lowest_subtitle_score ?? null,
+    (series: LibraryRow<Item.Series>) => series.lowest_subtitle_score ?? null,
     [],
   );
 
-  // A series with no language profile, or with no episode files, has nothing to
-  // complete, so it is untracked and belongs to neither group. Otherwise it is
-  // complete when no episode is missing.
   const subtitlesStatus = useCallback(
-    (series: Item.Series): SubtitlesStatus => {
-      if (series.profileId == null || series.episodeFileCount === 0)
-        return "untracked";
+    (series: LibraryRow<Item.Series>): SubtitlesStatus => {
+      if (series.episodeFileCount === 0) return "untracked";
+      // Source episodes can have their own profiles when the group has none.
+      if (series.origin === "source" && series.episodeMissingCount > 0)
+        return "missing";
+      if (series.profileId == null) return "untracked";
       return series.episodeMissingCount === 0 ? "complete" : "missing";
     },
     [],
@@ -111,7 +107,20 @@ const SeriesView: FunctionComponent = () => {
 
   // Ask the backend for the lowest-score aggregate only while the score filter
   // is active, mirroring how the list already fetches all rows for filtering.
-  const query = useSeriesPagination(true, scoreFilter !== "any");
+  const {
+    query,
+    labels,
+    arrNames,
+    defaultArr,
+    hasSources,
+    showBadge,
+    showAttention,
+    ownerFilter,
+    canUseSourceLibrary,
+    needsAttention,
+    onNeedsAttentionChange,
+    clearSourceFilters,
+  } = useSeriesLibrary(scoreFilter !== "any");
   const { data: upgradableData } = useUpgradableItems();
   const upgradableSeriesKeys = useMemo(
     () =>
@@ -125,76 +134,14 @@ const SeriesView: FunctionComponent = () => {
     [upgradableData?.seriesKeys, upgradableData?.series],
   );
 
-  const [selections, setSelections] = useState<Item.Series[]>([]);
-  const [dirties, setDirties] = useState<Item.Series[]>([]);
-  const setProfiles = useCallback(
-    (id: number | null) => {
-      const newItems = selections.map((v) => ({ ...v, profileId: id }));
-      setDirties((dirty) => uniqBy([...newItems, ...dirty], GetItemId));
-    },
-    [selections],
+  const [selections, setSelections] = useState<LibraryRow<Item.Series>[]>([]);
+  const { profileToolbar } = useLibraryProfileEdit(
+    "series",
+    selections,
+    mutation.mutateAsync,
   );
 
-  const { mutateAsync } = mutation;
-
-  const save = useCallback(() => {
-    const chunkSize = 1000;
-    const form: FormType.ModifyItem = { id: [], profileid: [] };
-    dirties.forEach((v) => {
-      const id = GetItemId(v);
-      if (id) {
-        form.id.push(id);
-        form.profileid.push(v.profileId);
-      }
-    });
-    const mutateInChunks = async (
-      ids: number[],
-      profileIds: (number | null)[],
-    ) => {
-      if (ids.length === 0) return;
-      await mutateAsync({
-        id: ids.slice(0, chunkSize),
-        profileid: profileIds.slice(0, chunkSize),
-      });
-      await mutateInChunks(ids.slice(chunkSize), profileIds.slice(chunkSize));
-    };
-    return mutateInChunks(form.id, form.profileid);
-  }, [dirties, mutateAsync]);
-
-  const profileToolbar = useMemo(() => {
-    if (selections.length === 0 && dirties.length === 0) return undefined;
-    return (
-      <Group gap="xs">
-        <Toolbox.Button
-          icon={faLanguage}
-          disabled={selections.length === 0}
-          onClick={() => {
-            modals.openContextModal(ChangeProfileModal, {
-              onSelect: setProfiles,
-            });
-          }}
-        >
-          Change Profile
-        </Toolbox.Button>
-        {dirties.length > 0 && (
-          <>
-            <Toolbox.Button icon={faUndo} onClick={() => setDirties([])}>
-              Cancel
-            </Toolbox.Button>
-            <Toolbox.MutateButton
-              icon={faCheck}
-              promise={save}
-              onSuccess={() => setDirties([])}
-            >
-              Save
-            </Toolbox.MutateButton>
-          </>
-        )}
-      </Group>
-    );
-  }, [selections, dirties, modals, setProfiles, save]);
-
-  const columns = useMemo<ColumnDef<Item.Series>[]>(
+  const columns = useMemo<ColumnDef<LibraryRow<Item.Series>>[]>(
     () => [
       {
         id: "selection",
@@ -218,29 +165,31 @@ const SeriesView: FunctionComponent = () => {
       },
       {
         id: "status",
-        cell: ({ row: { original } }) => (
-          <Group gap="xs" wrap="nowrap">
-            <Tooltip
-              label={
-                original.monitored
-                  ? "Monitored in Sonarr"
-                  : "Unmonitored in Sonarr"
-              }
-            >
-              <FontAwesomeIcon
-                icon={original.monitored ? faBookmark : farBookmark}
-              />
-            </Tooltip>
+        cell: ({ row: { original } }) =>
+          original.origin === "source" ? null : (
+            <Group gap="xs" wrap="nowrap">
+              <Tooltip
+                label={
+                  original.monitored
+                    ? "Monitored in Sonarr"
+                    : "Unmonitored in Sonarr"
+                }
+              >
+                <FontAwesomeIcon
+                  icon={original.monitored ? faBookmark : farBookmark}
+                />
+              </Tooltip>
 
-            <Tooltip label={original.ended ? "Ended" : "Continuing"}>
-              <FontAwesomeIcon icon={original.ended ? faStop : faPlay} />
-            </Tooltip>
-          </Group>
-        ),
+              <Tooltip label={original.ended ? "Ended" : "Continuing"}>
+                <FontAwesomeIcon icon={original.ended ? faStop : faPlay} />
+              </Tooltip>
+            </Group>
+          ),
       },
       {
         id: "upgradable",
         cell: ({ row: { original } }) =>
+          original.origin !== "source" &&
           upgradableSeriesKeys.has(
             upgradableKey(original.sonarrSeriesId, original.arr_instance_id),
           ) ? (
@@ -257,7 +206,7 @@ const SeriesView: FunctionComponent = () => {
         header: "Name",
         accessorKey: "title",
         cell: ({ row: { original } }) => {
-          const target = `/series/${original.id}`;
+          const target = libraryItemPath("series", original);
           return (
             <Anchor className="table-primary" component={Link} to={target}>
               {original.title}
@@ -265,22 +214,20 @@ const SeriesView: FunctionComponent = () => {
           );
         },
       },
-      // Owning Sonarr instance (#156). Only shown when more than one Sonarr is
-      // configured. Every row is labeled: the default instance uses a muted
-      // grey badge and the other instances an accent badge so they stand out.
-      ...(multiInstance
+      ...(showBadge
         ? [
             {
               id: "instance",
-              header: "Instance",
+              header: hasSources ? "Source" : "Instance",
               cell: ({ row: { original } }) => (
-                <InstanceBadge
-                  instanceId={original.arr_instance_id}
-                  defaultId={instanceDefaultId}
-                  nameById={instanceNameById}
+                <SourceBadge
+                  row={original}
+                  labels={labels}
+                  arrNames={arrNames}
+                  defaultArr={defaultArr}
                 />
               ),
-            } as ColumnDef<Item.Series>,
+            } as ColumnDef<LibraryRow<Item.Series>>,
           ]
         : []),
       {
@@ -370,12 +317,20 @@ const SeriesView: FunctionComponent = () => {
                   original: { lowest_subtitle_score: lowestScore },
                 },
               }) => <ScorePill score={lowestScore} />,
-            } as ColumnDef<Item.Series>,
+            } as ColumnDef<LibraryRow<Item.Series>>,
           ]
         : []),
       {
         id: "actions",
         cell: ({ row: { original } }) => {
+          if (original.origin === "source")
+            return (
+              <LibrarySourceRowActions
+                kind="series"
+                row={original}
+                canUseLibrary={canUseSourceLibrary}
+              />
+            );
           const batchItem: BatchItem = {
             type: "series",
             sonarrSeriesId: original.sonarrSeriesId,
@@ -529,25 +484,40 @@ const SeriesView: FunctionComponent = () => {
       mutation,
       modals,
       upgradableSeriesKeys,
-      multiInstance,
-      instanceNameById,
-      instanceDefaultId,
+      showBadge,
+      canUseSourceLibrary,
+      hasSources,
+      labels,
+      arrNames,
+      defaultArr,
       scoreFilter,
     ],
   );
 
   const selectionToolbar = useMemo(() => {
     if (selections.length === 0) return undefined;
+    const sourceRows = selections.filter((item) => item.origin === "source");
+    const arrRows = selections.filter((item) => item.origin !== "source");
 
     const toBatchItems = (): BatchItem[] =>
-      selections.map((s) => ({
+      arrRows.map((s) => ({
         type: "series" as const,
         sonarrSeriesId: s.sonarrSeriesId,
         arr_instance_id: s.arr_instance_id ?? undefined,
       }));
 
+    if (sourceRows.length > 0)
+      return (
+        <LibrarySourceSelectionActions
+          kind="series"
+          rows={sourceRows}
+          arrItems={toBatchItems()}
+          canUseLibrary={canUseSourceLibrary}
+        />
+      );
+
     const toWantedItems = (): WantedItem[] =>
-      selections.map((s) => ({
+      arrRows.map((s) => ({
         type: "series" as const,
         sonarrSeriesId: s.sonarrSeriesId,
         title: s.title,
@@ -678,7 +648,7 @@ const SeriesView: FunctionComponent = () => {
         </Menu>
       </Group>
     );
-  }, [selections, modals]);
+  }, [selections, modals, canUseSourceLibrary]);
 
   useDocumentTitle(`Series - ${useAppTitle()}`);
 
@@ -700,9 +670,18 @@ const SeriesView: FunctionComponent = () => {
         onScoreFilterChange={setScoreFilter}
         scoreValue={scoreValue}
         scoreThreshold={scoreThreshold}
-        instanceOptions={multiInstance ? instanceOptions : undefined}
-        instanceValues={instanceFilter}
-        onInstanceValuesChange={setInstanceFilter}
+        instanceOptions={ownerFilter.options}
+        instanceValues={ownerFilter.values}
+        onInstanceValuesChange={ownerFilter.onChange}
+        instanceLabel={ownerFilter.label}
+        showSingleInstance={ownerFilter.showSingle}
+        getInstanceValue={getLibraryOwnerKey}
+        needsAttention={needsAttention}
+        onNeedsAttentionChange={
+          showAttention ? onNeedsAttentionChange : undefined
+        }
+        clearSourceFilters={clearSourceFilters}
+        getRowId={getLibraryRowKey}
         tagValues={tagFilter}
         onTagValuesChange={setTagFilter}
         enableRowSelection

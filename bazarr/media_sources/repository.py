@@ -198,6 +198,14 @@ def get_group(group_id, target=None, *, for_update=False):
     return _target(target).execute(statement).first()
 
 
+def get_item_group(item, target=None):
+    if item.group_id is None:
+        return None
+    statement = sa.select(Groups).where(Groups.c.id == item.group_id, Groups.c.source_id == item.source_id,
+                                        Groups.c.library_id == item.library_id)
+    return _target(target).execute(statement).first()
+
+
 def library_groups(library_id, target=None):
     return _target(target).execute(
         sa.select(Groups).where(Groups.c.library_id == library_id).order_by(Groups.c.id)).all()
@@ -245,8 +253,10 @@ def create_group(*, source_id, library_id, kind, group_key, title, identity_sour
 
 # Items
 
-def get_item(item_id, target=None, *, for_update=False, nowait=False):
+def get_item(item_id, target=None, *, group_id=None, for_update=False, nowait=False):
     statement = sa.select(Items).where(Items.c.id == item_id)
+    if group_id is not None:
+        statement = statement.where(group_item_scope(group_id))
     if for_update:
         statement = statement.with_for_update(nowait=nowait)
     return _target(target).execute(statement).first()
@@ -256,24 +266,36 @@ def get_item_by_path(path, target=None):
     return _target(target).execute(sa.select(Items).where(Items.c.path == path)).first()
 
 
-def list_items(*, source_id=None, library_id=None, kind=None, limit=100, offset=0, target=None):
+def group_item_scope(group_id):
+    return sa.and_(Items.c.group_id == group_id, sa.select(Groups.c.id).where(
+        Groups.c.id == group_id, Groups.c.source_id == Items.c.source_id,
+        Groups.c.library_id == Items.c.library_id,
+    ).exists())
+
+
+def list_items(*, source_id=None, library_id=None, group_id=None, kind=None, limit=100, offset=0, target=None):
     statement = sa.select(Items)
     if source_id is not None:
         statement = statement.where(Items.c.source_id == source_id)
     if library_id is not None:
         statement = statement.where(Items.c.library_id == library_id)
+    if group_id is not None:
+        statement = statement.where(group_item_scope(group_id)).order_by(
+            sa.func.coalesce(Items.c.season, 0), sa.func.coalesce(Items.c.episode, 0), Items.c.part_number)
     if kind is not None:
         statement = statement.where(Items.c.kind == kind)
     statement = statement.order_by(Items.c.sort_title, Items.c.id).limit(limit).offset(offset)
     return _target(target).execute(statement).all()
 
 
-def count_items(*, source_id=None, library_id=None, kind=None, target=None):
+def count_items(*, source_id=None, library_id=None, group_id=None, kind=None, target=None):
     statement = sa.select(sa.func.count()).select_from(Items)
     if source_id is not None:
         statement = statement.where(Items.c.source_id == source_id)
     if library_id is not None:
         statement = statement.where(Items.c.library_id == library_id)
+    if group_id is not None:
+        statement = statement.where(group_item_scope(group_id))
     if kind is not None:
         statement = statement.where(Items.c.kind == kind)
     return _target(target).execute(statement).scalar_one()
@@ -497,6 +519,19 @@ def retained_activity_by_kind(target=None):
                      sa.exists().where(Blacklist.c.item_kind == item_kind)).label(content_kind)
               for content_kind, item_kind in by_kind.items()]
     return _target(target).execute(sa.select(*checks)).mappings().one()
+
+
+def retained_sports_owners_without_libraries(target=None):
+    """Owners whose retained records would otherwise lack an entry in the Sports filter."""
+    libraries = Libraries.c
+    owners = sa.union(*(
+        sa.select(table.c.source_id).where(
+            table.c.item_kind == 'sports_event',
+            ~sa.exists().where(libraries.source_id == table.c.source_id, libraries.content_kind == 'sports'),
+        )
+        for table in (History, Blacklist)
+    ))
+    return set(_target(target).execute(owners).scalars())
 
 
 # Enabled flags, overlap and holders

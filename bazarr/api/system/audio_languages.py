@@ -79,11 +79,15 @@ class AudioLanguages(Resource):
             from media_sources.wanted import wanted_list_items
 
             audio = repository.Items.c.audio_language
-            for kind in ('episode', 'movie'):
-                query = wanted_list_items(kind, database, audio).where(audio.is_not(None), audio != '[]').distinct()
+            for kind in ('episode', 'movie', 'sports_event'):
+                query = (select(audio).where(repository.Items.c.kind == kind) if kind == 'sports_event'
+                         else wanted_list_items(kind, database, audio))
+                query = query.where(audio.is_not(None), audio != '[]').distinct()
                 for value in database.scalars(query):
                     try:
-                        lang_set.update(lang for lang in ast.literal_eval(value) if lang)
+                        langs = ast.literal_eval(value)
+                        if isinstance(langs, list):
+                            lang_set.update(lang for lang in langs if isinstance(lang, str) and lang)
                     except (ValueError, SyntaxError):
                         continue
 

@@ -104,9 +104,18 @@ const leagues: ItemSearchResult[] = [
 function renderSearch(
   configuredInstances = instances,
   searchResults = results,
+  sourceConfigured = false,
 ) {
   server.use(
-    http.get("/api/system/searches", () => HttpResponse.json(searchResults)),
+    http.get("/api/system/media-sources", () =>
+      HttpResponse.json({ data: sourceConfigured ? [{ id: 8 }] : [] }),
+    ),
+    http.get("/api/system/searches", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("sources")).toBe(
+        sourceConfigured ? "1" : null,
+      );
+      return HttpResponse.json(searchResults);
+    }),
     http.get("/api/system/arr-instances", () =>
       HttpResponse.json(configuredInstances),
     ),
@@ -116,7 +125,10 @@ function renderSearch(
     { path: "/", element: <Search /> },
     { path: "/movies/:id", element: <p>Movie details</p> },
     { path: "/series/:id", element: <p>Series details</p> },
+    { path: "/movies/source/:id", element: <p>Source movie details</p> },
+    { path: "/series/source/:id", element: <p>Source series details</p> },
     { path: "/sports/:id", element: <p>League details</p> },
+    { path: "/sports/source/:id", element: <p>Source league details</p> },
   ]);
 
   rawRender(
@@ -136,6 +148,117 @@ describe("Search Bar", () => {
 
     expect(screen.getByPlaceholderText("Search")).toHaveValue("");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { title: "Standalone show", path: "/series/source/101", kind: "show" },
+    { title: "Standalone film", path: "/movies/source/101", kind: "movie" },
+    { title: "Standalone league", path: "/sports/source/101", kind: "league" },
+  ])(
+    "opens $title when source and Arr IDs overlap",
+    async ({ title, path, kind }) => {
+      const user = userEvent.setup();
+      const { router } = renderSearch(
+        instances,
+        [
+          { ...results[0], title: "Standalone Arr show" },
+          {
+            id: 101,
+            origin: "source",
+            source_kind: "show",
+            title: "Standalone show",
+            year: "2020",
+            poster: null,
+          },
+          {
+            id: 101,
+            origin: "source",
+            source_kind: "movie",
+            title: "Standalone film",
+            year: "2021",
+            poster: null,
+          },
+          {
+            id: 101,
+            origin: "source",
+            source_kind: "league",
+            title: "Standalone league",
+            year: "",
+            poster: null,
+          },
+        ],
+        true,
+      );
+
+      await user.type(screen.getByPlaceholderText("Search"), "standalone");
+
+      const option = await screen.findByRole("option", {
+        name: new RegExp(title),
+      });
+      expect(screen.getAllByRole("option")).toHaveLength(4);
+      expect(option).toHaveAttribute("value", `source:${kind}:101`);
+      expect(within(option).queryByText("HD Series")).not.toBeInTheDocument();
+      expect(within(option).queryByText("HD Movies")).not.toBeInTheDocument();
+      await user.click(option);
+
+      expect(router.state.location.pathname).toBe(path);
+    },
+  );
+
+  it("shows source navigation with an old settings file", async () => {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {},
+          media_sources: { visible: false },
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderSearch(
+      instances,
+      [
+        { ...results[0], title: "Archive Arr title" },
+        {
+          id: 101,
+          origin: "source",
+          source_kind: "movie",
+          title: "Archive source title",
+          year: "2020",
+          poster: null,
+        },
+      ],
+      true,
+    );
+    await user.type(screen.getByPlaceholderText("Search"), "archive");
+    expect(
+      await screen.findByRole("option", { name: /Archive Arr title/ }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("option", { name: /Archive source title/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps an Arr-only search while no source is configured", async () => {
+    const user = userEvent.setup();
+    renderSearch(instances, [
+      { ...results[0], title: "Archive Arr title" },
+      {
+        id: 101,
+        origin: "source",
+        source_kind: "league",
+        title: "Unexpected archive league",
+        year: "",
+        poster: null,
+      },
+    ]);
+    await user.type(screen.getByPlaceholderText("Search"), "archive");
+    expect(
+      await screen.findByRole("option", { name: /Archive Arr title/ }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("option", { name: /Unexpected archive league/ }),
+    ).not.toBeInTheDocument();
   });
 
   it.each([

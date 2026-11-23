@@ -56,7 +56,13 @@ export function isServerSourceKind(kind: string): kind is ServerSourceKind {
 
 export type SourceAvailability = Record<
   SourceContentKind,
-  { browsable: boolean; searchable: boolean; retained: boolean }
+  {
+    browsable: boolean;
+    searchable: boolean;
+    retained: boolean;
+    removed?: boolean;
+    retained_source_ids?: number[];
+  }
 >;
 
 interface MediaSourceList {
@@ -195,6 +201,13 @@ class MediaSourcesApi extends BaseApi {
 
   removeLibrary(id: number, libraryId: number) {
     return this.delete(`/${id}/libraries/${libraryId}`);
+  }
+
+  async scanLibrary(sourceId: number, libraryId: number) {
+    const { data } = await this.postRaw<{ job_id?: number | null }>(
+      `/${sourceId}/libraries/${libraryId}/scan`,
+    );
+    return data.job_id ?? null;
   }
 
   async scan(id: number) {

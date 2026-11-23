@@ -512,7 +512,6 @@ export default function SourceLibraries({ instance, kind }: Props) {
   const query = useMediaSources();
   const scan = useScanMediaSource();
   const [editor, setEditor] = useState<Editor | null>(null);
-  if (!query.isEnabled) return null;
   const source = query.data?.data.find(
     (row) => row.kind === kind && row.media_server_instance_id === instance.id,
   );

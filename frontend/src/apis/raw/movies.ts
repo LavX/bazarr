@@ -1,5 +1,6 @@
 import BaseApi from "./base";
 import { blacklistParams, blacklistRemovalRequest } from "./blacklist";
+import { libraryParams, LibraryRow, LibraryScope } from "./library";
 
 class MovieApi extends BaseApi {
   constructor() {
@@ -48,6 +49,13 @@ class MovieApi extends BaseApi {
       ...(includeScores ? { scores: 1 } : {}),
     });
     return response;
+  }
+
+  library(range: Parameter.Range, includeScores: boolean, scope: LibraryScope) {
+    return this.get<DataWrapperWithTotal<LibraryRow<Item.Movie>>>(
+      "",
+      libraryParams(range, includeScores, scope),
+    );
   }
 
   async modify(form: FormType.ModifyItem) {

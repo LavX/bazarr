@@ -62,7 +62,7 @@ def queue_missing_subtitles_recalculation(series=None, movies=None, *, source_sc
 
     With neither argument the whole library is recalculated. Otherwise
     ``series`` and ``movies`` are lists of ``(upstream id, owning instance)``
-    pairs. ``source_scope`` limits the pass to source items, optionally within a library or group.
+    pairs. ``source_scope`` limits the pass to source items, optionally by item, group or library.
 
     Never raises: the save that called this has already been written, and
     failing its response now would report a save that did happen as one that

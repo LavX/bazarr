@@ -620,21 +620,16 @@ it.each(["jellyfin", "emby"] as const)(
 );
 
 it.each(["jellyfin", "emby"] as const)(
-  "hides the linked %s source panel when media sources are disabled and keeps its connection form unchanged",
+  "shows the linked %s source despite retired visibility settings and keeps its connection form separate",
   async (kind) => {
     const fixture = setup(kind, [source(kind)], false);
     await screen.findByRole("region", { name: "Living room" });
-    expect(screen.queryByText("Library source")).toBeNull();
-    expect(screen.queryByText("Cinema")).toBeNull();
-    expect(screen.queryByText("/server/movies")).toBeNull();
-    expect(screen.queryByText("/local/movies")).toBeNull();
-    for (const name of [
-      "Use as a library source",
-      "Add library",
-      "Scan libraries",
-      "Edit roots",
-    ]) {
-      expect(screen.queryByRole("button", { name })).toBeNull();
+    expect(await screen.findByText("Cinema")).toBeVisible();
+    expect(screen.getByText("Library source")).toBeVisible();
+    expect(screen.getByText("/server/movies")).toBeVisible();
+    expect(screen.getByText("/local/movies")).toBeVisible();
+    for (const name of ["Add library", "Scan libraries", "Edit roots"]) {
+      expect(screen.getByRole("button", { name })).toBeVisible();
     }
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
     const dialog = within(await screen.findByRole("dialog"));
@@ -651,7 +646,8 @@ it.each(["jellyfin", "emby"] as const)(
     } else {
       expect(dialog.getByText("Path mappings")).toBeInTheDocument();
     }
-    expect(fixture.reads).toEqual([]);
+    expect(fixture.reads).toContain("source list");
+    expect(fixture.reads).not.toContain(connectionId);
   },
 );
 
