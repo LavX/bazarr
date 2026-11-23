@@ -40,6 +40,7 @@ import {
   sourceError,
   SourceGroup,
   SourceItem,
+  sourceNotFound,
   useSourceEpisodes,
   useSourceGroup,
   useSourceItem,
@@ -356,6 +357,13 @@ export function SourceSubtitleTable({ item }: { item: SourceItem }) {
 
 function SourceEpisodeView({ item }: { item: SourceItem }) {
   const query = useSourceItem(item.id, item.kind);
+  if (item.kind === "sports_event" && sourceNotFound(query.error)) {
+    return (
+      <Alert color="red" role="alert">
+        This event is no longer available.
+      </Alert>
+    );
+  }
   const current = query.data ?? item;
   return (
     <QueryOverlay result={query}>
@@ -381,6 +389,17 @@ const SourceSportsEventModal = withModal(
     size: "xl",
   },
 );
+
+function SourceSportsEventTitle({
+  event,
+}: {
+  event: Pick<SourceItem, "id" | "title">;
+}) {
+  const { data, error } = useSourceItem(event.id, "sports_event");
+  return sourceNotFound(error)
+    ? "Event unavailable"
+    : (data?.title ?? event.title);
+}
 
 function SourceLeagueEvents({ id }: { id: number }) {
   const query = useSourceLeagueEvents(id);
@@ -408,7 +427,7 @@ function SourceLeagueEvents({ id }: { id: number }) {
                 modals.openContextModal(
                   SourceSportsEventModal,
                   { item: event },
-                  { title: event.title },
+                  { title: <SourceSportsEventTitle event={event} /> },
                 )
               }
             >
@@ -441,6 +460,13 @@ function SourceLeagueEvents({ id }: { id: number }) {
     ],
     [modals],
   );
+  if (sourceNotFound(query.error)) {
+    return (
+      <Alert color="red" role="alert">
+        These events are no longer available.
+      </Alert>
+    );
+  }
   return (
     <QueryOverlay result={query}>
       <Stack>
@@ -639,7 +665,8 @@ export function SourceSeriesDetailView() {
 export function SourceLeagueDetailView() {
   const id = validId(useParams().id);
   const query = useSourceGroup(id, "league");
-  const item = query.data;
+  const unavailable = sourceNotFound(query.error);
+  const item = unavailable ? undefined : query.data;
   useDocumentTitle(
     `${item?.title ?? "Unknown League"} - ${useAppTitle()} (Sports)`,
   );
@@ -652,11 +679,19 @@ export function SourceLeagueDetailView() {
           <Anchor component={Link} to="/sports" size="sm">
             Sports
           </Anchor>
-          <Text size="sm">{item?.title ?? "Loading..."}</Text>
+          <Text size="sm">
+            {item?.title ?? (unavailable ? "League unavailable" : "Loading...")}
+          </Text>
         </Breadcrumbs>
       </nav>
       <QueryOverlay result={query}>
-        {query.isError && <Alert color="red">{sourceError(query.error)}</Alert>}
+        {unavailable ? (
+          <Alert color="red" role="alert">
+            This league is no longer available.
+          </Alert>
+        ) : (
+          query.isError && <Alert color="red">{sourceError(query.error)}</Alert>
+        )}
         {item && (
           <Stack>
             <SourceDetailBadge item={item} />

@@ -18,8 +18,8 @@ import type { MediaSource } from "@/apis/raw/mediaSources";
 import type { SportsFilters } from "@/apis/raw/sports";
 import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
 import {
-  sourceDetailKeys,
   sourceDetailApi,
+  sourceDetailKeys,
   useSourceLeagueEvents,
 } from "@/pages/SourceDetail/api";
 import server from "@/tests/mocks/node";
@@ -101,7 +101,16 @@ function setup() {
       HttpResponse.json(availability()),
     ),
     http.patch("/api/system/media-sources/8", async ({ request }) => {
-      Object.assign(state.source, await request.json());
+      const input = (await request.json()) as Record<string, unknown>;
+      if (
+        Object.keys(input).some(
+          (field) =>
+            !["name", "enabled", "scan_frequency_hours"].includes(field),
+        )
+      ) {
+        return HttpResponse.json({ error: "invalid_request" }, { status: 400 });
+      }
+      Object.assign(state.source, input);
       return HttpResponse.json(state.source);
     }),
     http.patch(
@@ -323,7 +332,11 @@ it.each(["source", "library"] as const)(
               enabled: false,
               profile_id: null,
             })
-          : api.mediaSources.update(source.id, { ...source, enabled: false }),
+          : api.mediaSources.update(source.id, {
+              name: source.name,
+              enabled: false,
+              scan_frequency_hours: source.scan_frequency_hours,
+            }),
       );
     });
     expect(result.current.wanted.data?.data[0]?.title).toBe("Native final");
@@ -395,7 +408,7 @@ it("saving a movie library leaves sports members, activity and badges fresh", as
   unmount();
 });
 
-it("removing a movie-only source with no retained sports leaves sports caches fresh", async () => {
+it("removing a movie-only source with only removed-source Sports history leaves sports caches fresh", async () => {
   const { client, wrapper, source } = setup();
   const movieSource = {
     ...source,
@@ -409,8 +422,8 @@ it("removing a movie-only source with no retained sports leaves sports caches fr
       sports: {
         browsable: false,
         searchable: false,
-        retained: false,
-        retained_source_ids: [],
+        retained: true,
+        removed: true,
       },
     },
   });
@@ -455,7 +468,7 @@ it("cancels an unknown-owner event list's first fetch before refreshing after re
           total: 1,
         });
       }
-      return HttpResponse.json({ data: [], total: 0 });
+      return HttpResponse.json({ error: "not_found" }, { status: 404 });
     }),
   );
   const { result, unmount } = renderHook(
@@ -475,14 +488,15 @@ it("cancels an unknown-owner event list's first fetch before refreshing after re
       library: source.libraries[0],
     });
   });
-  await waitFor(() => expect(result.current.events.data).toEqual([]));
+  await waitFor(() => expect(result.current.events.isError).toBe(true));
+  expect(result.current.events.data).toBeUndefined();
   expect(fetchEvents.mock.calls[0][1]?.aborted).toBe(true);
   expect(reads).toBe(2);
   await act(async () => {
     releaseFirst();
     await Promise.resolve();
   });
-  expect(result.current.events.data).toEqual([]);
+  expect(result.current.events.data).toBeUndefined();
   fetchEvents.mockRestore();
   unmount();
 });

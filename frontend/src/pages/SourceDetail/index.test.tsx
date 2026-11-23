@@ -5,9 +5,10 @@ import { http, HttpResponse } from "msw";
 import { vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import { invalidateSourceDetails } from "@/apis/queries/sourceDetails";
 import client from "@/apis/raw/client";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor, within } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { sourceDetailApi, sourceDetailKeys } from "./api";
 import {
@@ -225,6 +226,107 @@ it("keeps manual Sports tools available for an unprofiled, shadowed recording", 
     await screen.findByRole("dialog", { name: "Search Subtitles" }),
   ).toBeVisible();
 });
+
+it.each(["league", "event list", "event dialog"] as const)(
+  "hides cached %s data after a not-found response",
+  async (removed) => {
+    const user = userEvent.setup();
+    const league = { ...movie, kind: "league", title: "Cached league" };
+    const event = {
+      ...movie,
+      id: 60,
+      group_id: league.id,
+      kind: "sports_event",
+      title: "Cached race",
+      season: 2026,
+    };
+    let refetch = false;
+    function notFound() {
+      return HttpResponse.json({ error: "not_found" }, { status: 404 });
+    }
+    server.use(
+      http.get("/api/sources/groups/7", () =>
+        refetch && removed === "league"
+          ? notFound()
+          : HttpResponse.json(league),
+      ),
+      http.get("/api/sources/groups/7/items", () =>
+        refetch && removed !== "event dialog"
+          ? notFound()
+          : HttpResponse.json({ data: [event], total: 1 }),
+      ),
+      http.get("/api/sources/items/60", () =>
+        refetch ? notFound() : HttpResponse.json(event),
+      ),
+    );
+    openPage("sports");
+    const race = await screen.findByRole("button", { name: event.title });
+    if (removed === "event dialog") {
+      await user.click(race);
+      const dialog = within(
+        await screen.findByRole("dialog", { name: event.title }),
+      );
+      await waitFor(() =>
+        expect(
+          queryClient.getQueryState(sourceDetailKeys.item(60, "sports_event"))
+            ?.status,
+        ).toBe("success"),
+      );
+      expect(
+        dialog.getByRole("button", { name: "Manual Search" }),
+      ).toBeVisible();
+      expect(dialog.getByText("movie.en.hi.srt")).toBeVisible();
+    }
+
+    const key =
+      removed === "league"
+        ? sourceDetailKeys.group(7, "league")
+        : removed === "event list"
+          ? sourceDetailKeys.leagueEvents(7)
+          : sourceDetailKeys.item(60, "sports_event");
+    refetch = true;
+    await act(async () => {
+      await invalidateSourceDetails(queryClient, {
+        sourceId: 3,
+        libraryId: 11,
+      });
+    });
+    await waitFor(() =>
+      expect(queryClient.getQueryState(key)?.status).toBe("error"),
+    );
+    expect(queryClient.getQueryData(key)).toBeDefined();
+
+    if (removed === "event dialog") {
+      const dialog = within(screen.getByRole("dialog"));
+      expect(
+        dialog.queryByRole("button", { name: "Manual Search" }),
+      ).not.toBeInTheDocument();
+      expect(dialog.queryByText("movie.en.hi.srt")).not.toBeInTheDocument();
+      expect(screen.getByRole("dialog")).toHaveAccessibleName(
+        "Event unavailable",
+      );
+      expect(dialog.getByRole("alert")).toBeVisible();
+      await user.keyboard("{Escape}");
+      expect(
+        await screen.findByRole("button", { name: event.title }),
+      ).toBeVisible();
+    } else {
+      expect(
+        screen.queryByRole("button", { name: event.title }),
+      ).not.toBeInTheDocument();
+      if (removed === "league") {
+        expect(
+          screen.queryByText(league.title, { exact: true }),
+        ).not.toBeInTheDocument();
+      } else {
+        expect(
+          screen.getByRole("heading", { name: league.title }),
+        ).toBeVisible();
+      }
+      expect(screen.getByRole("alert")).toBeVisible();
+    }
+  },
+);
 
 it("reads the source movie despite a colliding Arr cache and normalizes its stored subtitle rows", async () => {
   queryClient.setQueryData([QueryKeys.Movies, 7], { title: "Wrong Arr movie" });

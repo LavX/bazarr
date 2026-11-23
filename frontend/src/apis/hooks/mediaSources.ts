@@ -69,9 +69,8 @@ function sourceOwnsSports(
     client.getQueryData<Awaited<ReturnType<typeof api.mediaSources.list>>>(
       mediaSourcesKey,
     )?.availability?.sports;
-  if (sports?.retained_source_ids)
-    return sports.retained_source_ids.includes(source.id);
-  return sports?.retained === false ? false : includeUnknown;
+  if (!sports) return includeUnknown;
+  return sports.retained_source_ids?.includes(source.id) ?? false;
 }
 
 export function useWriteMediaSource({

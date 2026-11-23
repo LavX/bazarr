@@ -378,6 +378,10 @@ export function useSourceScan() {
   });
 }
 
+export function sourceNotFound(error: unknown) {
+  return isAxiosError(error) && error.response?.status === 404;
+}
+
 export function sourceError(error: unknown) {
   if (
     isAxiosError<{ message?: string }>(error) &&
