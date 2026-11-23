@@ -310,7 +310,7 @@ class StateDocument(dict):
 
     def __init__(self, data: dict[str, Any]):
         super().__init__(data)
-        self.keyless_stage_slots: dict[str, dict[str, SlotIdentity]] = {}
+        self.release_slots: dict[str, dict[str, SlotIdentity]] = {}
 
 
 def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument":
@@ -342,12 +342,11 @@ def compose(data: dict[str, Any], rows: list[dict[str, Any]]) -> "StateDocument"
         slots = by_plugin.get(plugin_id)
         if not slots or not isinstance(installation, dict):
             continue
-        if STAGED in slots and _data_key(slots[STAGED]) is None:
-            document.keyless_stage_slots[plugin_id] = {
-                state: SlotIdentity(release["id"], release["created_at"], release.get("source_id"),
-                                    release.get("origin"), release.get("bundle_digest"))
-                for state, release in slots.items()
-            }
+        document.release_slots[plugin_id] = {
+            state: SlotIdentity(release["id"], release["created_at"], release.get("source_id"),
+                                release.get("origin"), release.get("bundle_digest"))
+            for state, release in slots.items()
+        }
         for state, keys in ((ACTIVE, _ACTIVE_KEYS), (STAGED, _STAGED_KEYS)):
             release = slots.get(state)
             if release is None:
@@ -479,16 +478,13 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                 rebound_source = adoption[1]
                 # Adopt only into the existing staged slot. A retired release with the same code is unrelated.
                 staged_release = next((release for release in existing if release["state"] == STAGED), None)
-                # A removed catalog or a trust demotion clears the installation's binding. The release
-                # keeps its original source in that case.
                 source_id = row.get("source_id")
                 if staged_release is not None and (
                         _data_key(staged_release) is not None or staged_release["version"] != staged.version
                         or staged_release.get("bundle_path") != staged.bundle_path
                         or staged_release.get("python_path") != staged.python_path
                         or _loads(staged_release.get("manifest")) != staged.manifest
-                        or (source_id is not None and staged_release.get("source_id") != source_id
-                            and rebound_source != source_id)
+                        or (staged_release.get("source_id") != source_id and rebound_source != source_id)
                         or staged_release.get("origin") != row.get("origin")):
                     raise ReleaseTransitionError("the staged release changed before its data key could be recorded")
             else:
