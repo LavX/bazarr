@@ -910,6 +910,8 @@ def active_installations(
     Defaults to subtitle providers, which is what every caller before kinds
     meant. ``kind=None`` returns every kind and is for kind-neutral code only.
     """
+    from .release_settings import provider_restore_pending
+
     data = load_state(path)
     installations = []
     for provider_id, item in (data.get("installations") or {}).items():
@@ -917,7 +919,8 @@ def active_installations(
             continue
         if kind is not None and kind_of(item) != kind:
             continue
-        if item.get("state") != "active" or item.get("pending_restart") or item.get("blocked"):
+        if (item.get("state") != "active" or item.get("pending_restart") or item.get("blocked")
+                or provider_restore_pending(item)):
             continue
         manifest = item.get("manifest")
         if not isinstance(manifest, dict):
@@ -963,6 +966,8 @@ def running_installations(
     the non-pending rows would let a provider be admitted on a
     settings-section credential that never reaches its worker config.
     Defaults to subtitle providers; ``kind=None`` returns every kind."""
+    from .release_settings import provider_restore_pending
+
     data = load_state(path)
     installations = []
     for provider_id, item in (data.get("installations") or {}).items():
@@ -971,7 +976,7 @@ def running_installations(
         if kind is not None and kind_of(item) != kind:
             continue
         # A plugin held back at boot because what it relies on is not running does not run.
-        if not item.get("active_version") or item.get("blocked"):
+        if not item.get("active_version") or item.get("blocked") or provider_restore_pending(item):
             continue
         # A removal that waits for no restart was detached while Bazarr+ ran: its row stays until its calls are
         # done, and nothing reads it as running.

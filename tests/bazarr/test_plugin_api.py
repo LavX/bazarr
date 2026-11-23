@@ -1676,8 +1676,9 @@ def test_rollback_checks_the_retained_snapshot_and_accepts_an_unchanged_set_of_m
         assert response.status_code == 200 and row["active_version"] == "1.0.0"
 
 
+@pytest.mark.parametrize("restarts", [False, True])
 def test_rollback_restores_the_exact_release_settings_and_keeps_unowned_values(
-        client, rollback_store, monkeypatch, service_kind):
+        client, rollback_store, monkeypatch, service_kind, restarts):
     from app.config import settings
     from provider_hub import release_settings, service, state, state_store
     from secret_store.crypto import is_encrypted
@@ -1685,7 +1686,9 @@ def test_rollback_restores_the_exact_release_settings_and_keeps_unowned_values(
     monkeypatch.setattr(settings.general, "secrets_encryption_key", "fixture-setting-encryption", raising=False)
     from provider_hub.kinds import ATTACH_ON_RESTART
 
-    monkeypatch.setattr(service_kind, "attach_policy", ATTACH_ON_RESTART)
+    if restarts:
+        monkeypatch.setattr(service_kind, "attach_policy", ATTACH_ON_RESTART)
+    status = "waiting" if restarts else "activated"
     plugin_id = "exampleservice"
     old = service_manifest(plugin_id, "1.0.0", config_schema={"properties": {"region": {"type": "string"}}})
     new = service_manifest(plugin_id, "2.0.0", config_schema={"properties": {
@@ -1705,19 +1708,102 @@ def test_rollback_restores_the_exact_release_settings_and_keeps_unowned_values(
     state.mutate_state(save_new_values)
     preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
     assert preview["restores_settings"] is True
-    assert _rollback(client, plugin_id).json == {"status": "waiting", "version": "1.0.0"}
-    assert service.activate_staged_installations() == [plugin_id]
+    assert _rollback(client, plugin_id).json == {"status": status, "version": "1.0.0"}
+    # Startup also retires a replaced live release after its former workers have stopped.
+    assert service.activate_staged_installations() == ([plugin_id] if restarts else [])
     assert state.load_state()["installations"][plugin_id]["config"] == {"region": "eu", "unrelated": "keep me"}
     assert state_store.list_releases(plugin_id, states=("active",))[0].id == retired.id
-    assert _rollback(client, plugin_id, version="2.0.0").json == {"status": "waiting", "version": "2.0.0"}
-    assert service.activate_staged_installations() == [plugin_id]
+    assert _rollback(client, plugin_id, version="2.0.0").json == {"status": status, "version": "2.0.0"}
+    assert service.activate_staged_installations() == ([plugin_id] if restarts else [])
     assert state.load_state()["installations"][plugin_id]["config"] == {
         "region": "us", "official_mode": "new", "unrelated": "keep me"}
 
 
-@pytest.mark.parametrize("clear_secret", [False, True])
+def test_provider_rollback_restores_its_settings_section_after_credential_check(client, rollback_store, monkeypatch):
+    from app import config
+    from provider_hub import release_settings, service, state
+    from provider_hub.kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND
+
+    plugin_id = "providerhub"
+    path = f"/api/plugins/installations/{plugin_id}/rollback"
+    monkeypatch.setattr(config.settings.general, "secrets_encryption_key", "fixture-setting-encryption", raising=False)
+    monkeypatch.setattr(SUBTITLE_PROVIDER_KIND, "smoke_test", lambda *args, **kwargs: None)
+    monkeypatch.setitem(config.settings, plugin_id, {"region": "before", "api_key": "", "unrelated": "keep"})
+    saves = []
+    rejected_write = False
+
+    def save_on_fixture():
+        saves.append(config.settings[plugin_id].get("region"))
+        return not rejected_write
+
+    monkeypatch.setattr(config, "write_config", save_on_fixture)
+    manifests = [provider_manifest_v1(plugin_id, version, config_schema={"type": "object", "properties": {
+        "api_key": {"type": "string"}, "region": {"type": "string"},
+        "base_url": {"type": "string", "format": "uri", "default": address}}})
+        for version, address in (("1.0.0", "https://original.example.test"), ("2.0.0", "https://current.example.test"))]
+    rollback_store(plugin_id, previous=manifests[0], current=manifests[1], stage_current=True)
+    assert service.activate_staged_installations() == [plugin_id]
+    config.save_settings([("settings-providerhub-region", "edited"), ("settings-providerhub-api_key", "fixture value")])
+    before = state.load_state()
+    preview = _get(client, path).json
+    assert "Remove the saved provider credential" in preview["blocked_reason"]
+    assert _rollback(client, plugin_id).status_code == 400
+    assert state.load_state() == before
+    config.save_settings([("settings-providerhub-api_key", "")])
+    preview = _get(client, path).json
+    assert preview["blocked_reason"] is None and preview["restores_settings"]
+    assert preview["consent"]["added"]["destinations"] == ["https://original.example.test"]
+    assert _rollback(client, plugin_id).status_code == 400
+    reply = _rollback(client, plugin_id, consent=preview["consent"]["digest"])
+    assert reply.json == {"status": "waiting", "version": "1.0.0"}, reply.json
+    rejected_write = True
+    assert service.activate_staged_installations() == [plugin_id]
+    row = state.load_state()["installations"][plugin_id]
+    assert release_settings.provider_restore_pending(row)
+    assert all(item.provider_id != plugin_id for item in state.active_installations())
+    assert service.test_provider_connection(plugin_id)["status"] == "blocked"
+    assert config.settings[plugin_id].get("region") == "edited"
+    rejected_write = False
+    service.resume_rollback_activations()
+    assert not release_settings.provider_restore_pending(state.load_state()["installations"][plugin_id])
+    assert next(item for item in state.active_installations() if item.provider_id == plugin_id).active_version == "1.0.0"
+    assert config.settings[plugin_id].get("region") == "before" and saves[-1] == "before"
+    assert config.settings[plugin_id].get("unrelated") == "keep"
+    assert not config.settings[plugin_id].get("api_key")
+
+
+def test_a_live_rollback_conflict_discards_its_stage(client, rollback_store, monkeypatch):
+    from app.config import settings
+    from provider_hub import service, state
+
+    monkeypatch.setattr(settings.general, "secrets_encryption_key", "fixture-setting-encryption", raising=False)
+    plugin_id = "exampleservice"
+    schema = {"properties": {"region": {"type": "string"}}}
+    rollback_store(previous=service_manifest(plugin_id, "1.0.0", config_schema=schema),
+                   current=service_manifest(plugin_id, "2.0.0", config_schema=schema), stage_current=True)
+    assert service.activate_staged_installations() == [plugin_id]
+    preview = _get(client, f"/api/plugins/installations/{plugin_id}/rollback").json
+    assert preview["restores_settings"]
+    real_verify = service._verified_staged_release
+
+    def save_during_probe(*args, **kwargs):
+        manifest = real_verify(*args, **kwargs)
+        state.mutate_state(lambda doc: doc["installations"][plugin_id]["config"].update(region="latest edit"))
+        return manifest
+
+    monkeypatch.setattr(service, "_verified_staged_release", save_during_probe)
+    refused = _rollback(client, plugin_id)
+    assert refused.status_code == 409
+    row = state.load_state()["installations"][plugin_id]
+    assert row["active_version"] == "2.0.0" and row["config"] == {"region": "latest edit"}
+    assert row.get("staged_version") is None and not row["pending_restart"]
+    assert service.activate_staged_installations() == []
+    assert service._previous_release(plugin_id).version == "1.0.0"
+
+
+@pytest.mark.parametrize("secret_case", ["retained", "cleared", "retyped"])
 def test_translator_rollback_restores_only_surviving_declared_owners(
-        client, rollback_store, hub_engine, monkeypatch, clear_secret):
+        client, rollback_store, hub_engine, monkeypatch, secret_case):
     from app.config import settings
     from app.database import Base, TableTranslatorConnection, TableTranslatorEngineInstance, TableTranslatorSecret
     from provider_hub import service, state
@@ -1737,26 +1823,32 @@ def test_translator_rollback_restores_only_surviving_declared_owners(
     store = TranslatorStore(session)
     monkeypatch.setattr("provider_hub.kinds.translator._store", lambda: store)
     plugin_id = "translationfixture"
+    clear_secret = secret_case == "cleared"
     previous_address = "https://original.example.test/translate?option=fixture"
     new_address = "https://current.example.test/translate"
     secret = {"key": "passcode", "type": "secret"}
     shared_fields = [{"key": "prompt", "type": "text"}, {"key": "server", "type": "text", "destination": True}]
     previous_fields = [*shared_fields, secret]
+    old_settings = {"prompt": "old engine", "server": previous_address}
+    if clear_secret:
+        previous_fields = [shared_fields[0], {**shared_fields[1], "default": previous_address}, secret]
+        old_settings.pop("server")
     next_fields = [*shared_fields, {"key": "subtitle_style", "type": "text"}]
     if clear_secret:
         next_fields.append(secret)
+    elif secret_case == "retyped":
+        next_fields.append({"key": "passcode", "type": "text"})
 
     def manifest(version, fields, version_number):
         return service_manifest(plugin_id, version, kind="translator", kind_api="bazarr.translator.v1",
                                 settings_version=version_number, settings={"fields": fields, "backend_types": {
-                                    "local": {"fields": fields}}})
+                                    "local": {"fields": [fields[0]]}}})
 
     try:
         previous = manifest("1.0.0", previous_fields, 1)
         current = manifest("2.0.0", next_fields, 2)
         rollback_store(plugin_id, previous=previous, current=current, stage_current=True)
-        instance = store.create_instance(plugin_id, name="Operator name",
-                                         settings={"prompt": "old engine", "server": previous_address})
+        instance = store.create_instance(plugin_id, name="Operator name", settings=old_settings)
         engine = (INSTANCE, instance.id)
         store.set_secret(engine, "passcode", "fixture passcode", destinations=frozenset({previous_address}))
         owned = store.add_connection(instance.id, "local", settings={"prompt": "old built-in"})
@@ -1771,6 +1863,8 @@ def test_translator_rollback_restores_only_surviving_declared_owners(
                  "expected_revision": instance.revision, "accept_destinations": [new_address]}
         if clear_secret:
             edits["clear_secrets"] = ["passcode"]
+        elif secret_case == "retyped":
+            edits["values"]["passcode"] = "ordinary public field edit"
         saved = controller.save_engine(instance.id, edits)["engine"]
         assert saved["secrets"] == {} and not saved["awaiting_secrets"]
         assert store.secret_field_names(engine) == (set() if clear_secret else {"passcode"})
@@ -1785,6 +1879,9 @@ def test_translator_rollback_restores_only_surviving_declared_owners(
         assert _rollback(client, plugin_id).status_code == 400
         reply = _rollback(client, plugin_id, consent=preview["consent"]["digest"])
         assert reply.json == {"status": "waiting", "version": "1.0.0"}, reply.json
+        controller.save_engine(instance.id, {"values": {"prompt": "saved while rollback is queued"},
+                                              "expected_revision": instance.revision})
+        assert store.secret_field_names(engine) == (set() if clear_secret else {"passcode"})
         active = DestinationSchema(fields=tuple(previous_fields))
         if clear_secret:
             real_activation = TranslatorKind.on_activated
@@ -1795,17 +1892,17 @@ def test_translator_rollback_restores_only_surviving_declared_owners(
             monkeypatch.setattr(TranslatorKind, "on_activated", interrupt_before_reconciliation)
         assert service.activate_staged_installations() == [plugin_id]
         prompt = "old engine"
-        assert store.settings_of(instance) == {"prompt": prompt, "server": previous_address}
+        assert store.settings_of(instance) == {**old_settings, "prompt": prompt}
         if clear_secret:
             assert service._PENDING_ROLLBACK_HOOK in state.load_state()["installations"][plugin_id]
             prompt = "edited after restart"
-            store.save_instance_settings(instance.id, {"prompt": prompt, "server": previous_address}, schema=active)
+            store.save_instance_settings(instance.id, {**old_settings, "prompt": prompt}, schema=active)
             monkeypatch.setattr(TranslatorKind, "on_activated", real_activation)
             service.resume_rollback_activations()
         owners = {row.id: store.settings_of(row) for row in store.list_connections(instance.id)}
         assert owners == {owned.id: {"prompt": "old built-in"}, extension.id: {"prompt": "extension edited"},
                           new_owner.id: {"prompt": "new owner"}}
-        assert store.settings_of(instance) == {"prompt": prompt, "server": previous_address}
+        assert store.settings_of(instance) == {**old_settings, "prompt": prompt}
         assert set(store.secrets_for_request(engine, frozenset({previous_address}), fields=active.secret_fields)) == (
             set() if clear_secret else {"passcode"})
         assert store.secrets_for_request(engine, frozenset({new_address}), fields=active.secret_fields) == {}

@@ -2693,8 +2693,8 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
         # to the class that took its id back (a built-in a plugin had replaced). The registry is what says whose
         # class holds the id: a row that still names a release (a revocation lifted without a restart, an install
         # over a removal) is not enough.
-        if installation.get("blocked") or (
-                installation.get("state") == "removed" and not installation.get("pending_restart")):
+        if (installation.get("blocked") or release_settings.provider_restore_pending(installation)
+                or (installation.get("state") == "removed" and not installation.get("pending_restart"))):
             continue
         from .registry import is_plugin_class
 
@@ -3066,6 +3066,10 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "status": "pending_restart",
                 "message": "Restart Bazarr+ before testing this staged plugin",
             }
+        if release_settings.provider_restore_pending(provider):
+            return _blocked_connection_result(provider_id, {
+                "blocked_reason": "The previous provider settings have not finished restoring",
+            }, job)
         if provider.get("blocked"):
             return _blocked_connection_result(provider_id, provider, job)
 
@@ -5726,6 +5730,14 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
                     datadir.publish_activation_data(root, probe_data, target)
             prior_settings = release_settings.record_for(installation, staged_release) if rollback else None
             restored = release_settings.read(prior_settings)
+            provider_section = None
+            provider_settings_copy = None
+            if same_owner and kind_of(installation) == SUBTITLE_PROVIDER:
+                provider_section = release_settings.provider_section(provider_id)
+                if restored:
+                    plan = release_settings.provider_restore_plan(state, provider_id, installation, manifest.raw,
+                                                                 restored, section=provider_section)
+                    provider_settings_copy = release_settings.seal(plan)
             translator_owners = {}
             retained_owner_settings = None
             translator_update = kind_of(installation) == TRANSLATOR and isinstance(previous_manifest, dict)
@@ -5734,13 +5746,14 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
                 from subtitles.tools.translate.runtime.plugin_update import capture_release_settings
 
                 translator_owners = capture_release_settings(_store(), provider_id, previous_manifest, manifest.raw)
-                if restored.get("owners"):
+                if rollback and translator_owners:
                     retained_owner_settings = release_settings.seal({
-                        "owners": restored["owners"],
+                        "owners": restored.get("owners", {}),
                         "revisions": {key: owner["revision"] for key, owner in translator_owners.items()},
                     })
             outgoing_settings = (release_settings.capture(state, provider_id, installation, active_release,
-                                                           translator_owners) if same_owner else None)
+                                                           translator_owners, section=provider_section)
+                                 if same_owner else None)
             reconcile_after_commit = rollback or translator_update
             attention = None if reconcile_after_commit else activation_attention(manifest)
         except Exception as error:
@@ -5772,7 +5785,10 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
                 # stands, and a revoked release is dropped by the next refresh.
                 return False, None
             if outgoing_settings is not None and row.get("config") != installation.get("config"):
-                # The staged bundle is still valid. Re-read the owner's save before taking its release copy.
+                # A refused rollback must not remain queued for the next boot.
+                if rollback:
+                    _abandon_staged_release(state, provider_id, row, _ROLLBACK_CHANGED)
+                    return False, _ROLLBACK_CHANGED
                 return False, None
             if restored:
                 release_settings.restore_config(state, provider_id, row, restored)
@@ -5816,6 +5832,8 @@ def activate_release(provider_id: str, *, at_boot: bool = False, _expected_stage
                 row[_PENDING_ROLLBACK_HOOK] = {"identity": identity, "previous_manifest": previous_manifest}
                 if retained_owner_settings is not None:
                     row[_PENDING_ROLLBACK_HOOK]["settings_copy"] = retained_owner_settings
+                if provider_settings_copy is not None:
+                    row[_PENDING_ROLLBACK_HOOK]["provider_settings_copy"] = provider_settings_copy
             else:
                 row.pop(_PENDING_ROLLBACK_HOOK, None)
             if provider_id == seed.GOOGLE_PLUGIN_ID:
@@ -5944,7 +5962,7 @@ _ROLLBACK_ACTIVE_FIELDS = ("active_version", "active_path", "python_path", "mani
 _ROLLBACK_STAGED_FIELDS = (releases.STAGED_ROLLBACK, "staged_version", "staged_path",
                            "staged_python_path", "staged_manifest", "staged_data_key", "staged_data_rollback")
 _ROLLBACK_CHANGED = "The previous release changed; review the rollback again"
-_PENDING_ROLLBACK_HOOK = "pending_rollback_hook"
+_PENDING_ROLLBACK_HOOK = release_settings.PENDING_HOOK
 _ACTIVATION_HOOK_ERROR = "Its saved settings could not be brought up to date with this version."
 
 
@@ -5994,6 +6012,9 @@ def _finish_rollback_activation(state, provider_id: str) -> None:
         return
     marker = row[_PENDING_ROLLBACK_HOOK]
     try:
+        if marker.get("provider_settings_copy") is not None:
+            plan = release_settings.unseal(marker["provider_settings_copy"])
+            release_settings.restore_provider_section(provider_id, plan, row.get("config") or {})
         if marker.get("settings_copy") is not None:
             from .kinds.translator import _store
             from subtitles.tools.translate.runtime.plugin_update import restore_release_settings
@@ -6062,9 +6083,12 @@ def retained_settings_manifest(provider_id: str) -> dict[str, Any] | None:
     """The same-registration previous manifest whose saved settings may return."""
     state = load_state()
     row = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(row, dict) or row.get("state") == "removed":
+        return None
+    if row.get(releases.STAGED_ROLLBACK) and _staged_rollback_refusal(state, provider_id, row) is None:
+        return row.get("staged_manifest")
     target = _previous_release(provider_id)
-    if (target is not None and isinstance(row, dict) and row.get("state") != "removed"
-            and _rollback_owned(state, provider_id, row, target)):
+    if target is not None and _rollback_owned(state, provider_id, row, target):
         return target.manifest
     return None
 
@@ -6113,23 +6137,51 @@ def rollback_consent(provider_id: str, *, _state=None, _row=None, _target=None) 
     target = _target if _target is not None else _previous_release(provider_id)
     if not isinstance(row, dict) or target is None or target.manifest is None:
         return None
-    if kind_of(row) == SUBTITLE_PROVIDER and not closure.has_needs(target.manifest):
-        return None
-    delta = consent.update_delta(state, row.get("manifest"), {"manifest": target.manifest}, closure.Closure())
-    settings_copy = release_settings.record_for(row, target)
-    if settings_copy is None or kind_of(row) != TRANSLATOR:
+    settings_copy = release_settings.read(release_settings.record_for(row, target))
+    provider = kind_of(row) == SUBTITLE_PROVIDER
+    ordinary_provider = provider and not closure.has_needs(target.manifest)
+    delta = None if ordinary_provider else consent.update_delta(
+        state, row.get("manifest"), {"manifest": target.manifest}, closure.Closure())
+    if not settings_copy:
         return delta
-    from .kinds.translator import _store
-    from subtitles.tools.translate.runtime.plugin_update import rollback_settings_destinations
+    if provider:
+        try:
+            changed = release_settings.provider_restore_plan(
+                state, provider_id, row, target.manifest, settings_copy)["changed"]
+        except ValueError as error:
+            raise ProviderHubInstallError(str(error)) from None
+        if not changed:
+            return delta
+        if delta is None:
+            delta = {"plugin": {"id": provider_id, "name": row.get("name") or provider_id,
+                                "from_version": row.get("active_version"), "to_version": target.version,
+                                "kind": SUBTITLE_PROVIDER},
+                     "added": {key: [] for key in ("destinations", "destination_fields", "permissions",
+                                                   "binaries", "plugins")},
+                     "digest": _rollback_confirmation(state, row, target)}
+        restored = [address for addresses in changed.values() for address in addresses]
+        delta["added"]["destination_fields"] = sorted(set(delta["added"]["destination_fields"]) | set(changed))
+    elif kind_of(row) == TRANSLATOR:
+        from .kinds.translator import _store
+        from subtitles.tools.translate.runtime.plugin_update import rollback_settings_destinations
 
-    restored = rollback_settings_destinations(_store(), provider_id, target.manifest,
-                                              release_settings.read(settings_copy).get("owners", {}))
-    if restored:
-        # The consent pins the typed address, while the confirmation shows its origin without query or path data.
-        origins = {f"{parts.scheme}://{parts.netloc}" for parts in map(urlparse, restored)}
-        delta["added"]["destinations"] = sorted(set(delta["added"]["destinations"]) | origins)
-        delta["digest"] = consent.digest_of((delta["digest"], sorted(restored)))
-        delta["needs_consent"] = True
+        restored = rollback_settings_destinations(_store(), provider_id, target.manifest, settings_copy.get("owners", {}))
+        if not restored:
+            return delta
+    else:
+        return delta
+    # The consent pins the restored address. The confirmation shows only its origin.
+    origins = set(delta["added"]["destinations"])
+    for address in restored:
+        try:
+            parsed = urlparse(address)
+            if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password:
+                origins.add(f"{parsed.scheme}://{parsed.netloc}")
+        except ValueError:
+            continue
+    delta["added"]["destinations"] = sorted(origins)
+    delta["digest"] = consent.digest_of((delta["digest"], sorted(restored)))
+    delta["needs_consent"] = True
     return delta
 
 
@@ -6138,6 +6190,8 @@ def _checked_rollback_target(state, provider_id, target, *, verify_files=True):
     row = (state.get("installations") or {}).get(provider_id)
     if not isinstance(row, dict) or not row.get("active_version") or row.get("state") == "removed":
         raise ProviderHubInstallError(f"{provider_id} is not installed")
+    if release_settings.provider_restore_pending(row):
+        raise ProviderHubInstallError("The previous provider settings have not finished restoring")
     if row.get("staged_version"):
         if row.get(releases.STAGED_ROLLBACK):
             status = "waiting for restart" if needs_restart(row) else "in progress"
@@ -6175,7 +6229,9 @@ def _checked_rollback_target(state, provider_id, target, *, verify_files=True):
             f"so it cannot be restored ({refusal_text(error)})") from error
     if verify_files:
         try:
-            release_settings.read(release_settings.record_for(row, target))
+            snapshot = release_settings.read(release_settings.record_for(row, target))
+            if snapshot and kind_of(row) == SUBTITLE_PROVIDER:
+                release_settings.provider_restore_plan(state, provider_id, row, target.manifest, snapshot)
         except ValueError as error:
             raise ProviderHubInstallError(str(error)) from None
     plugin = parse_plugin_manifest(target.manifest) if target.manifest.get("schema_version") == 2 else None
@@ -6208,7 +6264,10 @@ def rollback_preview(provider_id: str, *, state=None, verify_files=True, include
         result["blocked_reason"] = refusal_text(error)
     else:
         if include_consent:
-            result["consent"] = rollback_consent(provider_id, _state=state, _row=row, _target=target)
+            try:
+                result["consent"] = rollback_consent(provider_id, _state=state, _row=row, _target=target)
+            except ProviderHubInstallError as error:
+                result["blocked_reason"] = refusal_text(error)
     return result
 
 

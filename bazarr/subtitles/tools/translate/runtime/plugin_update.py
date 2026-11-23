@@ -72,7 +72,7 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
     def retained_schema(kind: str, row) -> DestinationSchema:
         return DestinationSchema(fields=tuple(_owner_fields(retained, kind, row))) if retained else DestinationSchema()
 
-    store.drop_undeclared_secrets(plugin_id, schema_for, skip=blocked, retained_schema=retained_schema)
+    store.drop_undeclared_secrets(plugin_id, schema_for, retained_schema=retained_schema)
     store.apply_plugin_update(plugin_id, schema_for, new_settings=prune, plugin_version=parsed.version,
                               settings_version=parsed.settings_version, skip=blocked)
     if blocked:
@@ -110,8 +110,7 @@ def capture_release_settings(store: TranslatorStore, plugin_id: str, manifest, n
         future = _owner_fields(new, kind, row)
         excluded = _secret_fields(fields) | _secret_fields(future) | store.secret_field_names((kind, row.id))
         old_keys = {item["key"] for item in fields} - excluded
-        future_keys = {item["key"] for item in future} - excluded
-        if not old_keys and not future_keys:
+        if not fields and not future:
             continue
         keys = _settings_keys(kind, fields) & old_keys
         values = {key: value for key, value in store.settings_of(row).items() if key in keys}
@@ -134,8 +133,8 @@ def rollback_settings_destinations(store: TranslatorStore, plugin_id: str, targe
         stored = snapshot["values"]
         fields = _owner_fields(target, kind, row)
         held = store.secret_field_names((kind, row.id))
-        schema = DestinationSchema(fields=tuple(item for item in fields if item["key"] in stored
-                                                and item["key"] not in held and not is_secret_field(item)))
+        schema = DestinationSchema(fields=tuple(item for item in fields
+                                                if item["key"] not in held and not is_secret_field(item)))
         restored.update(destination for destination in effective_destinations(schema, stored)
                         if not destination.startswith("invalid:"))
     return restored
@@ -150,18 +149,23 @@ def restore_release_settings(store: TranslatorStore, plugin_id, current_manifest
         for kind, row in store.owners_of_plugin(plugin_id):
             key = f"{kind}:{row.id}"
             snapshot = snapshots.get(key)
-            if snapshot is None or row.revision != revisions.get(key) or _owner_identity(kind, row) != snapshot["identity"]:
+            if row.revision != revisions.get(key):
                 continue
+            matches = snapshot is not None and _owner_identity(kind, row) == snapshot["identity"]
             before = _owner_fields(current, kind, row)
             after = _owner_fields(target, kind, row)
-            excluded = _secret_fields(before) | _secret_fields(after) | store.secret_field_names((kind, row.id))
-            owned = (_settings_keys(kind, before) | _settings_keys(kind, after)) - excluded
-            incoming = _settings_keys(kind, after) - excluded
-            settings = {key: value for key, value in store.settings_of(row).items() if key not in owned}
-            settings.update({key: value for key, value in snapshot["values"].items() if key in incoming})
-            host = ({key: value for key, value in snapshot["values"].items()
-                     if key in HOST_KEYS and key not in excluded and any(item["key"] == key for item in after)}
-                    if kind != INSTANCE else {})
+            # A later plain-text edit must never overwrite a stored credential or undo a clear.
+            target_secrets = _secret_fields(after)
+            excluded = _secret_fields(before) | target_secrets | store.secret_field_names((kind, row.id))
+            owned = (_settings_keys(kind, before) | _settings_keys(kind, after)) - excluded if matches else set()
+            settings = {key: value for key, value in store.settings_of(row).items() if key not in owned | target_secrets}
+            host = {}
+            if matches:
+                incoming = _settings_keys(kind, after) - excluded
+                settings.update({key: value for key, value in snapshot["values"].items() if key in incoming})
+                if kind != INSTANCE:
+                    host = {key: value for key, value in snapshot["values"].items()
+                            if key in HOST_KEYS and key not in excluded and any(item["key"] == key for item in after)}
             store.restore_release_settings(kind, row, settings, host)
 
 
