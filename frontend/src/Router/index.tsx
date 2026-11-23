@@ -48,7 +48,6 @@ import SettingsNotificationsView from "@/pages/Settings/Notifications";
 import SettingsProvidersView from "@/pages/Settings/Providers";
 import SettingsSchedulerView from "@/pages/Settings/Scheduler";
 import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
-import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
 import Sports from "@/pages/Sports";
@@ -68,6 +67,9 @@ import ArrMediaRoute from "./ArrMediaRoute";
 import Redirector from "./Redirector";
 import { RouterNames } from "./RouterNames";
 import TranslationGate from "./TranslationGate";
+import TranslationSettingsRoute, {
+  TranslationRedirect,
+} from "./TranslationSettingsRoute";
 import { CustomRouteObject } from "./type";
 
 const StatisticsView = lazy(() => import("@/pages/Statistics"));
@@ -380,13 +382,13 @@ export function useRoutes(): CustomRouteObject[] {
               {
                 path: "translator",
                 name: "AI Translator",
-                element: <SettingsTranslatorView></SettingsTranslatorView>,
+                element: <TranslationSettingsRoute />,
               },
               {
                 // The page lived under Settings while it was being built.
                 path: "translation",
                 hidden: true,
-                element: <Navigate to="/translation" replace />,
+                element: <TranslationRedirect />,
               },
               {
                 path: "external",
