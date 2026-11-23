@@ -18,7 +18,6 @@ from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.indexer.utils import get_subtitle_destination_path
-from subtitles.tools.subsync_engines import SubtitleDestinationChanged
 from utilities.path_mappings import path_mappings
 
 from app.database import TableShows, TableEpisodes, TableMovies, database, select
@@ -111,7 +110,7 @@ def translation_write_kwargs(translator, job_id):
     kwargs = {'expected_versions': captured} if captured else {}
     source = getattr(translator, 'source', None)
     if source is not None:
-        from media_sources.indexer import SourcePublicationOwnerIndex
+        from media_sources.indexer import SourcePublicationOwnerIndex, SourcePublicationOwnersChanged
 
         owners = SourcePublicationOwnerIndex()
 
@@ -127,7 +126,7 @@ def translation_write_kwargs(translator, job_id):
                     if current is None or current.profile_id != prepared.profile_id:
                         raise SourceTranslationChanged('The source item moved or its profile changed')
                     yield
-            except SubtitleDestinationChanged as error:
+            except SourcePublicationOwnersChanged as error:
                 raise SourceTranslationChanged(str(error)) from error
         kwargs.update(publication_guard=publication, ownership_index=owners)
     return kwargs

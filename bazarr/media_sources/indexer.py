@@ -106,6 +106,10 @@ class SourceOutputOwnerIndex(SyncOutputOwnerIndex):
         return owners
 
 
+class SourcePublicationOwnersChanged(SubtitleDestinationChanged):
+    """The prepared shared ownership could not be pinned for publication."""
+
+
 class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
     """Source writes in shared subtitle folders must account for all media stored there."""
 
@@ -135,7 +139,7 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
             shared = bool(destination_setting[1])
             prepared = prepare() if prepare is not None else None
             if shared and self._prepared_paths is None:
-                raise SubtitleDestinationChanged('The shared subtitle owners could not be verified')
+                raise SourcePublicationOwnersChanged('The shared subtitle owners could not be verified')
             publishing = False
             try:
                 with source_item_publication(source, shared=shared) as (current, connection):
@@ -150,8 +154,8 @@ class SourcePublicationOwnerIndex(SourceOutputOwnerIndex):
                 sqlstate = getattr(error.orig, 'sqlstate', None) or getattr(error.orig, 'pgcode', None)
                 if publishing or sqlstate != '55P03':
                     raise
-                raise SubtitleDestinationChanged('The shared subtitle owners are being updated') from error
-        raise SubtitleDestinationChanged('The shared subtitle owners changed while preparing publication')
+                raise SourcePublicationOwnersChanged('The shared subtitle owners are being updated') from error
+        raise SourcePublicationOwnersChanged('The shared subtitle owners changed while preparing publication')
 
 
 def list_external_subtitles(path, previous=None, ownership_index=None, *, publication=False, written_paths=()):
