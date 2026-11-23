@@ -1518,6 +1518,25 @@ def _recheck_installed_trust(state: dict[str, Any], ancestry: _OfficialAncestry)
         if (isinstance(staged, dict) and isinstance(previous, dict)
                 and (previous.get("trusted") or previous.get("demoted_commit"))):
             recheck(provider_id, previous, active)
+        elif isinstance(staged, dict) and not isinstance(previous, dict):
+            # Older stages did not save the active installation's binding. Recover it only from an
+            # official release and a definite refresh decision about that release's own artifact.
+            release = _release_slots(state, provider_id).get(releases.ACTIVE)
+            origin = active.get("source") if isinstance(active, dict) else None
+            if (_active_release_owned(state, row, release)
+                    and (release.source_id, release.origin) == (OFFICIAL_CATALOG_SOURCE_ID, "catalog")
+                    and isinstance(origin, dict) and origin.get("trusted") is True
+                    and origin.get("repo") == OFFICIAL_CATALOG_REPO):
+                verdict, reason = ancestry.check(origin.get("commit"))
+                if verdict is not None:
+                    previous = {"source_id": OFFICIAL_CATALOG_SOURCE_ID, "origin": "catalog",
+                                "source_bound": True, "trusted": verdict}
+                    if not verdict:
+                        if built_in_ids is None:
+                            built_in_ids = _built_in_provider_ids()
+                        _demote_installation(previous, _commit_demotion_note(reason),
+                                             str(provider_id) in built_in_ids, for_commit=True)
+                    row["previous_source"] = previous
 
 
 def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any], commit: str) -> dict[str, Any]:
@@ -1916,8 +1935,8 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if key not in refreshed_entry_keys:
                         del entries[key]
             if source_ids is None or OFFICIAL_CATALOG_SOURCE_ID in source_ids:
-                _hold_revoked_installations(state)
                 _recheck_installed_trust(state, ancestry)
+                _hold_revoked_installations(state)
             if _fallback_setting_on():
                 _store_transport(state)
             ok_sources = sources_count - len(failed_sources)
@@ -5631,8 +5650,9 @@ def activate_release(provider_id: str, *, at_boot: bool = False) -> Activation:
             row["last_error"] = None
             row.pop("needs_repair", None)
             row["activated_at"] = utcnow_iso()
-            if isinstance(state, releases.StateDocument) and staged_release is not None and not same_owner:
-                # The old active slot may have identical files, even when it belongs to a different registration.
+            if (isinstance(state, releases.StateDocument) and staged_release is not None
+                    and (not same_owner or staged_release.catalog_registration != active_release.catalog_registration)):
+                # Matching files can belong to another registration or predate registration records.
                 state.promoting_stage = provider_id
             if attention:
                 row["last_error"] = attention

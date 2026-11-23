@@ -2010,6 +2010,61 @@ def test_reinstalling_the_same_bundle_uses_the_new_catalog_registration(catalog_
     assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,))[0].id == active.id
 
 
+@pytest.mark.parametrize("unbound_stage", [False, True])
+def test_approved_reinstall_binds_a_legacy_catalog_release_for_rollback(
+        catalog_data_owner, hub, monkeypatch, unbound_stage):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import releases, state_store
+    from provider_hub.state import mutate_state
+
+    service, _, _, _, _ = catalog_data_owner
+    plugin_id, source = "examplehub", "catalog-a"
+    old_version, new_version = "1.1.0", "1.2.0"
+
+    def publish(version, commit):
+        manifest = provider_manifest_v2(plugin_id, version)
+        monkeypatch.setattr(service, "_fetch_github_catalog", lambda *args, **kwargs: (
+            {"plugins": [{"manifest": manifest}]}, commit * 40))
+        assert service.refresh_catalog(source_ids={source})["entries"] == 1
+
+    def install(version):
+        consent = service.install_consent(source, plugin_id, version)
+        service.install_catalog_entry(source, plugin_id, version, consent_digest=consent["digest"])
+
+    publish(old_version, "b")
+    install(old_version)
+    assert service.activate_staged_installations() == [plugin_id]
+    if unbound_stage:
+        install(old_version)
+    # Recreate an installation last written before registrations were recorded.
+    mutate_state(lambda state: state["catalog_sources"][source].pop("registration"))
+    table = releases.releases_table
+    with hub.begin() as connection:
+        for saved in releases.read_rows(connection, plugin_id=plugin_id, states=releases.SLOT_STATES):
+            fields = [part for part in json.loads(saved["fields"]) if not part.startswith("catalog_registration:")]
+            connection.execute(table.update().where(table.c.id == saved["id"]).values(fields=json.dumps(fields)))
+    old_active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert old_active.catalog_registration is None
+
+    install(old_version)
+    checked_stage, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
+    assert checked_stage.bundle_path == old_active.bundle_path
+    assert checked_stage.data_key is old_active.data_key is None
+    assert checked_stage.catalog_registration == "legacy"
+    assert service.activate_staged_installations() == [plugin_id]
+    active, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert active.id == checked_stage.id and active.catalog_registration == "legacy"
+
+    publish(new_version, "c")
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline: Path(_bundle(plugin_id, manifest.version)))
+    assert service.apply_update(plugin_id)["staged_version"] == new_version
+    assert service.activate_staged_installations() == [plugin_id]
+    assert service.rollback_release(plugin_id).outcome == service.ACTIVATION_WAITING
+    assert service.activate_staged_installations() == [plugin_id]
+    restored, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
+    assert (restored.id, restored.version, restored.catalog_registration) == (active.id, old_version, "legacy")
+
+
 @pytest.mark.parametrize("action", ["restage", "keep", "activate"])
 def test_removing_only_the_staged_catalog_preserves_the_active_catalog_data_owner(
         catalog_data_owner, monkeypatch, action):
@@ -3547,15 +3602,30 @@ def test_refresh_revocation_restores_the_active_catalog_and_allows_its_previous_
 
 
 @pytest.mark.parametrize("saved_source", [False, True])
-def test_discarding_a_stage_does_not_restore_official_trust_the_refresh_rejected(
-        catalog_data_owner, monkeypatch, tmp_path, saved_source):
-    from provider_hub import catalog_feed
+@pytest.mark.parametrize("active_trusted", [False, True])
+@pytest.mark.parametrize("staged_trusted", [False, True])
+def test_discarding_a_stage_restores_only_the_active_official_trust_refresh_accepted(
+        catalog_data_owner, monkeypatch, tmp_path, saved_source, active_trusted, staged_trusted):
+    _check_discarded_official_stage(catalog_data_owner, monkeypatch, tmp_path,
+                                   saved_source, active_trusted, staged_trusted)
+
+
+def test_a_revoked_legacy_stage_preserves_the_active_official_trust_on_the_same_refresh(
+        catalog_data_owner, monkeypatch, tmp_path):
+    _check_discarded_official_stage(catalog_data_owner, monkeypatch, tmp_path,
+                                   False, True, True, revoke_stage=True)
+
+
+def _check_discarded_official_stage(
+        catalog_data_owner, monkeypatch, tmp_path, saved_source, active_trusted, staged_trusted,
+        revoke_stage=False):
+    from provider_hub import catalog_feed, releases, state_store
     from provider_hub.state import OFFICIAL_CATALOG_REPO, load_state, mutate_state
     from signed_feed_helpers import SignedWorld
 
     service, kind, published, _, _ = catalog_data_owner
     plugin_id = "examplehub"
-    old_commit, new_commit = "a" * 40, "b" * 40
+    old_commit, new_commit = "a" * 40, "d" * 40
     current = load_state()["installations"][plugin_id]
     old_source = {**current["manifest"]["source"], "repo": OFFICIAL_CATALOG_REPO,
                   "commit": old_commit, "trusted": True}
@@ -3563,34 +3633,54 @@ def test_discarding_a_stage_does_not_restore_official_trust_the_refresh_rejected
         **current, "active_path": _bundle(plugin_id, "official-old"),
         "source_id": "official", "trusted": True,
         "manifest": {**current["manifest"], "source": old_source}})
+    original, = state_store.list_releases(plugin_id, states=(releases.ACTIVE,))
     new_source = {**published["source"], "repo": OFFICIAL_CATALOG_REPO,
                   "commit": new_commit, "trusted": True}
-    validated = kind.validate_manifest({**published, "source": new_source}, True)
-    service._stage_validated(
-        validated, True, "catalog", "official",
-        lambda manifest, deadline: Path(_bundle(plugin_id, manifest.version)), catalog_list="plugins")
+    monkeypatch.setattr(catalog_feed, "counter_file", lambda: tmp_path / "feed-counter.json")
+    world = SignedWorld(monkeypatch)
+    world.ancestors.update((old_commit, new_commit))
+    world.publish(source_commit=new_commit, plugins=[{**published, "source": new_source}])
+    assert service.refresh_catalog(source_ids={"official"})["entries"] == 1
+    entry = next(entry for entry in load_state()["catalog_entries"].values()
+                 if entry["source"] == "official")
+    service.stage_install(entry["manifest"], source_id="official", catalog_list="plugins")
+    staged, = state_store.list_releases(plugin_id, states=(releases.STAGED,))
     if not saved_source:
         mutate_state(lambda state: state["installations"][plugin_id].pop("previous_source"))
 
-    monkeypatch.setattr(catalog_feed, "counter_file", lambda: tmp_path / "feed-counter.json")
-    world = SignedWorld(monkeypatch)
-    world.ancestors.add(new_commit)
-    world.publish()
+    world.ancestors.clear()
+    world.heads = {"main": "e" * 40, "beta": "e" * 40}
+    world.publish(commit="e" * 40, source_commit="e" * 40, version=101,
+                  plugins=[{**published, "source": new_source}],
+                  revocations=[{"id": plugin_id, "version": "1.1.0", "reason": "test revocation"}]
+                  if revoke_stage else [])
+    if active_trusted:
+        world.ancestors.add(old_commit)
+    if staged_trusted:
+        world.ancestors.add(new_commit)
     service.refresh_catalog(source_ids={"official"})
     refreshed = load_state()
     assert refreshed["catalog_sources"]["official"]["last_error"] is None
-    assert refreshed["installations"][plugin_id]["trusted"] is True
+    if not revoke_stage:
+        assert refreshed["installations"][plugin_id]["trusted"] is staged_trusted
 
-    def refuse(*args, **kwargs):
-        raise RuntimeError("the staged worker did not start")
+        def refuse(*args, **kwargs):
+            raise RuntimeError("the staged worker did not start")
 
-    monkeypatch.setattr(kind, "smoke_test", refuse)
-    assert service.activate_release(plugin_id, at_boot=True).outcome == service.ACTIVATION_FAILED
+        monkeypatch.setattr(kind, "smoke_test", refuse)
+        assert service.activate_release(plugin_id, at_boot=True).outcome == service.ACTIVATION_FAILED
 
     row = load_state()["installations"][plugin_id]
     assert row["active_version"] == "1.0.0" and not row["staged_version"]
-    assert row["trusted"] is False
-    if saved_source:
-        assert row["source_id"] is None and row["demoted_commit"] is True
+    assert row["trusted"] is active_trusted
+    assert row["source_bound"] is True and row["origin"] == "catalog"
+    if active_trusted:
+        assert row["source_id"] == "official" and not row.get("demoted_commit")
     else:
-        assert row["source_id"] == "official"
+        assert row["source_id"] is None and row["demoted_commit"] is True
+    assert state_store.list_releases(plugin_id, states=(releases.ACTIVE,)) == [original]
+    failed, = state_store.list_releases(plugin_id, states=(releases.FAILED,))
+    assert failed.id == staged.id
+
+    service.refresh_catalog(source_ids={"official"})
+    assert load_state()["installations"][plugin_id]["trusted"] is active_trusted

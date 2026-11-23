@@ -471,8 +471,8 @@ def split(data: dict[str, Any], rows: list[dict[str, Any]], *, now: str | None =
                         if for_install and (
                                 (release.get("source_id"), release.get("origin"))
                                 != (row.get("source_id"), row.get("origin"))
-                                or not matches_catalog_registration(
-                                    data, row.get("source_id"), _field_value(release, _CATALOG_REGISTRATION))):
+                                or _field_value(release, _CATALOG_REGISTRATION)
+                                != catalog_registration(data, row.get("source_id"))):
                             continue
                         return release
             return None
