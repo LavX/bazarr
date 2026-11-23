@@ -892,6 +892,202 @@ def test_provider_history_recorded_after_a_source_editor_save_cannot_claim_the_e
     assert not any(event.operation == 'delete' for event in writes)
 
 
+def _inline_source_sync(monkeypatch, source, jobs, content):
+    from app.config import settings
+    from subtitles import processing, sync
+    from subtitles.tools import subsyncer
+
+    monkeypatch.setattr(processing, '_defaul_sync_checker', lambda subtitle: True)
+    monkeypatch.setattr(settings.general, 'use_postprocessing', False)
+    monkeypatch.setattr(settings.subsync, 'use_subsync', True)
+    monkeypatch.setattr(settings.subsync, 'use_subsync_threshold', False)
+    monkeypatch.setattr(settings.subsync, 'use_subsync_movie_threshold', False)
+    monkeypatch.setattr(settings.subsync, 'enabled_engines', ['alass'])
+    monkeypatch.setattr(settings.subsync, 'output_mode', 'overwrite')
+    monkeypatch.setattr(settings.subsync, 'debug', False)
+    monkeypatch.setattr(sync, 'jobs_queue', jobs)
+    calls = []
+
+    def align(self, engine, output_path, video_path, no_fix_framerate):
+        assert video_path == source.path
+        calls.append((engine, Path(self.srtin).read_bytes()))
+        output_path.write_bytes(content)
+        return {'offset_seconds': 0.25, 'framerate_scale_factor': 1.0, 'quality_of_fit': 0.9}
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
+    return calls
+
+
+@pytest.mark.parametrize('kind', ['movie', 'episode'])
+def test_manual_download_inline_sync_records_its_publication_for_delete_and_exclude(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, kind):
+    from media_sources import repository
+    from subtitles import manual
+    from subtitles.tools.subsync_engines import regular_subtitle_version
+
+    source = _item(arr_library, tmp_path, kind)
+    subtitle = Path(source.path).with_suffix('.en.srt')
+    synced = pipeline.CONTENT.replace(b'Downloaded', b'Synchronized acquisition')
+    engines = _inline_source_sync(monkeypatch, source, isolated_jobs, synced)
+    payload, release = _search_for_download(client, monkeypatch, source)
+    monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
+    url = f'/api/sources/items/{source.item_id}'
+
+    response = client.post(f'{url}/manual', headers=HEADERS, json=payload)
+    assert response.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.json['job_id']
+    assert isolated_jobs._run_job(job), job.error
+    assert engines == [('alass', pipeline.CONTENT)]
+    assert subtitle.read_bytes() == synced
+    (acquired,) = arr_library.execute(sa.select(repository.History).where(repository.History.c.action == 2)).all()
+    assert acquired.published_file_version == list(regular_subtitle_version(subtitle))
+
+    excluded = client.post(f'{url}/blacklist', headers=HEADERS, json={
+        'subtitles_path': str(subtitle), 'language': 'en', 'provider': payload['provider'],
+        'subs_id': release, 'history_id': acquired.id,
+    })
+    assert excluded.status_code == 204, excluded.get_data(as_text=True)
+    assert not subtitle.exists()
+    (blacklisted,) = arr_library.execute(sa.select(repository.Blacklist)).all()
+    assert (blacklisted.item_id, blacklisted.provider, blacklisted.subs_id) == (
+        source.item_id, payload['provider'], release)
+    assert [event.operation for event in writes].count('delete') == 1
+
+
+@pytest.mark.parametrize('kind', ['movie', 'episode'])
+@pytest.mark.parametrize('replacement', ['before_processing', 'after_sync'])
+def test_editor_save_between_manual_publication_and_inline_processing_keeps_user_bytes(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, kind, replacement):
+    from media_sources import indexer, repository
+    from media_sources.subtitle_tools import SOURCE_SUBTITLE_EDITED_ACTION
+    from subtitles import manual, sync
+    from subtitles.tools.subsync_engines import regular_subtitle_version
+
+    source = _item(arr_library, tmp_path, kind)
+    subtitle = Path(source.path).with_suffix('.en.srt')
+    synced = pipeline.CONTENT.replace(b'Downloaded', b'Synchronized acquisition')
+    edited = pipeline.CONTENT.replace(b'Downloaded', b'User saved this cue while acquiring')
+    engines = _inline_source_sync(monkeypatch, source, isolated_jobs, synced)
+    payload, release = _search_for_download(client, monkeypatch, source)
+    monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
+    url = f'/api/sources/items/{source.item_id}'
+    process = manual.process_subtitle
+    synchronize = sync.sync_subtitles
+    published_versions = []
+
+    def edit_published_subtitle(expected):
+        assert subtitle.read_bytes() == expected
+        published_versions.append(list(regular_subtitle_version(subtitle)))
+        indexer.index_item(source.item_id)
+        opened = client.get(f'{url}/subtitles/en/content', headers=HEADERS)
+        assert opened.status_code == 200 and opened.json['content'] == expected.decode()
+        saved = client.put(f'{url}/subtitles/en/content',
+                           headers={**HEADERS, 'If-Match': opened.headers['ETag']},
+                           json={'content': edited.decode()})
+        assert saved.status_code == 204
+        assert subtitle.read_bytes() == edited
+
+    def edit_before_processing(*args, **kwargs):
+        assert subtitle.read_bytes() == pipeline.CONTENT
+        assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.History)) == 0
+        if replacement == 'before_processing':
+            edit_published_subtitle(pipeline.CONTENT)
+        return process(*args, **kwargs)
+
+    def edit_after_sync(*args, **kwargs):
+        result = synchronize(*args, **kwargs)
+        assert result is True
+        edit_published_subtitle(synced)
+        return result
+
+    monkeypatch.setattr(manual, 'process_subtitle', edit_before_processing)
+    if replacement == 'after_sync':
+        monkeypatch.setattr(sync, 'sync_subtitles', edit_after_sync)
+    response = client.post(f'{url}/manual', headers=HEADERS, json=payload)
+    assert response.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.json['job_id']
+    assert isolated_jobs._run_job(job), job.error
+    assert len(published_versions) == 1
+    assert engines == ([('alass', pipeline.CONTENT)] if replacement == 'after_sync' else [])
+    assert subtitle.read_bytes() == edited
+    rows = arr_library.execute(sa.select(repository.History).order_by(repository.History.c.id)).all()
+    assert [row.action for row in rows] == ([5] if replacement == 'after_sync' else []) + [
+        SOURCE_SUBTITLE_EDITED_ACTION, 2]
+    acquired = rows[-1]
+    assert acquired.published_file_version == published_versions[0]
+    assert acquired.published_file_version != list(regular_subtitle_version(subtitle))
+    evidence = {'subtitles_path': str(subtitle), 'language': 'en', 'provider': payload['provider'],
+                'subs_id': release, 'history_id': acquired.id}
+    refused = client.post(f'{url}/blacklist', headers=HEADERS, json=evidence)
+    assert refused.status_code == 409
+    assert refused.json['code'] == 'source_release_changed'
+    assert subtitle.read_bytes() == edited
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 0
+    assert not any(event.operation == 'delete' for event in writes)
+
+    excluded = client.post(f'{url}/blacklist', headers=HEADERS, json=evidence | {'delete_file': False})
+    assert excluded.status_code == 204
+    assert subtitle.read_bytes() == edited
+    assert arr_library.scalar(sa.select(sa.func.count()).select_from(repository.Blacklist)) == 1
+    assert not any(event.operation == 'delete' for event in writes)
+
+
+@pytest.mark.parametrize('changes_bytes', [False, True], ids=['unchanged-bytes', 'changed-bytes'])
+def test_manual_download_custom_command_retains_exclusion_without_claiming_file_ownership(
+        client, arr_library, writes, isolated_jobs, tmp_path, monkeypatch, changes_bytes):
+    from app.config import settings
+    from media_sources import repository
+    from subtitles import manual, post_processing
+
+    source = _item(arr_library, tmp_path, 'movie')
+    subtitle = Path(source.path).with_suffix('.en.srt')
+    processed = pipeline.CONTENT.replace(b'Downloaded', b'Custom command output') if changes_bytes else pipeline.CONTENT
+    payload, release = _search_for_download(client, monkeypatch, source)
+    monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
+    monkeypatch.setattr(settings.general, 'use_postprocessing', True)
+    monkeypatch.setattr(settings.general, 'postprocessing_cmd', 'fixture-command {{subtitles}}')
+    monkeypatch.setattr(settings.general, 'use_postprocessing_threshold_movie', False)
+    monkeypatch.setattr(settings.general, 'chmod_enabled', True)
+    monkeypatch.setattr(settings.general, 'chmod', '0640')
+    commands = []
+
+    def command(command, path):
+        assert path == source.path
+        assert command == ['fixture-command', str(subtitle)]
+        assert subtitle.read_bytes() == pipeline.CONTENT
+        commands.append(command)
+        if changes_bytes:
+            subtitle.write_bytes(processed)
+
+    monkeypatch.setattr(post_processing, '_postprocessing_locked', command)
+    url = f'/api/sources/items/{source.item_id}'
+    response = client.post(f'{url}/manual', headers=HEADERS, json=payload)
+    assert response.status_code == 202
+    job = isolated_jobs._reserve_next_job()
+    assert job.job_id == response.json['job_id']
+    assert isolated_jobs._run_job(job), job.error
+    assert len(commands) == 1 and commands[0][0] == 'fixture-command'
+    assert subtitle.read_bytes() == processed
+    (acquired,) = arr_library.execute(sa.select(repository.History)).all()
+    assert acquired.published_file_version is None
+    evidence = {'subtitles_path': str(subtitle), 'language': 'en', 'provider': payload['provider'],
+                'subs_id': release, 'history_id': acquired.id}
+    refused = client.post(f'{url}/blacklist', headers=HEADERS, json=evidence)
+    assert refused.status_code == 409
+    assert refused.json['code'] == 'source_release_changed'
+    assert subtitle.read_bytes() == processed
+
+    excluded = client.post(f'{url}/blacklist', headers=HEADERS, json=evidence | {'delete_file': False})
+    assert excluded.status_code == 204
+    assert subtitle.read_bytes() == processed
+    (blacklisted,) = arr_library.execute(sa.select(repository.Blacklist)).all()
+    assert (blacklisted.item_id, blacklisted.provider, blacklisted.subs_id) == (
+        source.item_id, payload['provider'], release)
+    assert not any(event.operation == 'delete' for event in writes)
+
+
 def test_legacy_release_exclusion_requires_matching_history_and_keeps_the_current_file(
         client, arr_library, writes, tmp_path):
     from media_sources import indexer, repository

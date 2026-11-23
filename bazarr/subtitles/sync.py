@@ -380,7 +380,8 @@ def sync_subtitles(video_path,
                    publication_guard=None,
                    return_job_id=False,
                    source=None,
-                   source_tool=None):
+                   source_tool=None,
+                   *, expected_source_version=None, on_overwrite_version=None):
     """Synchronize a subtitle. For keep-all output without a media owner, pass an indexing callback."""
     if source is not None and context is not None:
         raise ValueError('A source item cannot be combined with a sports context')
@@ -508,6 +509,9 @@ def sync_subtitles(video_path,
             }
             if source is not None:
                 sync_kwargs['source'] = source
+            if expected_source_version is not None:
+                sync_kwargs.update(expected_source_version=expected_source_version,
+                                   on_overwrite_version=on_overwrite_version)
             if source_tool is not None:
                 def source_tool_guard(destination):
                     return source_tool.publication(destination, cleanup_outputs=destination == srt_path)

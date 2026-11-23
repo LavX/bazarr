@@ -600,7 +600,8 @@ class SubSyncer:
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
              enabled_engines=None, write_history=True, arr_instance_id=None, source_version=None,
-             on_publish=None, validate=None, publication_guard=None, source=None, path_publication_guard=None):
+             on_publish=None, validate=None, publication_guard=None, source=None, path_publication_guard=None,
+             *, expected_source_version=None, on_overwrite_version=None):
         self.reference = video_path
         self.srtin = srt_path
         self.progress_callback = progress_callback
@@ -704,7 +705,12 @@ class SubSyncer:
         publication = source_version
         if publication is None:
             with publication_lock:
-                publication = SubtitlePublication(video_path, srt_path, subtitle_source_version(srt_path),
+                if expected_source_version is not None:
+                    version = expected_source_version
+                    owner_index['regular_source'] = True
+                else:
+                    version = subtitle_source_version(srt_path)
+                publication = SubtitlePublication(video_path, srt_path, version,
                                                   **owner_index)
 
         def publish():
@@ -725,6 +731,7 @@ class SubSyncer:
                 on_publish=on_publish,
                 **({'publication_guard': publication_guard} if publication_guard is not None else {}),
                 **({'path_publication_guard': path_publication_guard} if path_publication_guard is not None else {}),
+                **({'on_overwrite_version': on_overwrite_version} if on_overwrite_version is not None else {}),
                 **source_guard,
                 after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path))
                 if source is None and cleanup_outputs else None,

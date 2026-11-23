@@ -2145,6 +2145,7 @@ def test_automatic_source_sync_keeps_a_mapped_arr_owners_exact_variant(world, mo
     from media_sources import repository
     from subtitles import processing, sync
     from subtitles.tools import subsyncer
+    from subtitles.tools.subsync_engines import regular_subtitle_version
     from utilities.path_mappings import path_mappings
 
     folder = _custom_folder(world, monkeypatch, world.tmp_path)
@@ -2174,10 +2175,11 @@ def test_automatic_source_sync_keeps_a_mapped_arr_owners_exact_variant(world, mo
     monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', align)
     monkeypatch.setattr(settings.subsync, 'output_mode', 'overwrite')
     monkeypatch.setattr(settings.subsync, 'enabled_engines', ['alass'])
-    assert len(_generate(context, job_id=1, auto_translate=False)) == 1
+    (downloaded,) = _generate(context, job_id=1, auto_translate=False)
 
     assert calls == [('alass', context.path)]
     assert (folder / 'Film.en.srt').read_bytes() == synced_content
+    assert downloaded.published_file_version == regular_subtitle_version(folder / 'Film.en.srt')
     assert protected.read_bytes() == protected_content
     assert not obsolete.exists()
     assert world.db.scalar(sa.select(repository.History.c.action).where(repository.History.c.item_id == context.item_id)) == 5

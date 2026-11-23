@@ -77,6 +77,18 @@ def regular_subtitle_version(path):
     return _subtitle_file_version(entry) if stat.S_ISREG(entry.st_mode) else None
 
 
+def _replace_subtitle_file(staged_path, destination, *, capture_version):
+    """Install a staged file and optionally attest the revision of that entry."""
+    staged = regular_subtitle_version(staged_path) if capture_version else None
+    os.replace(staged_path, destination)
+    if staged is not None:
+        written = regular_subtitle_version(destination)
+        # Rename can change ctime. Verify the installed entry matches the staged file.
+        if written is not None and written[:4] == staged[:4]:
+            return written
+    return None
+
+
 @contextmanager
 def open_regular_subtitle(path, expected_version):
     """Open the same ordinary file the caller approved, without waiting on a stream."""
@@ -102,12 +114,13 @@ def read_regular_subtitle(path, expected_version, *, max_bytes=None):
 
 
 class SubtitlePublication:
-    """Hold a media coordinator while a queued sync watches exact destinations."""
+    """Hold a media coordinator while a sync watches exact destinations."""
 
-    def __init__(self, video_path, source_path, source_version, ownership_index=None):
+    def __init__(self, video_path, source_path, source_version, ownership_index=None, *, regular_source=False):
         self.state = subtitle_write_lock(video_path, os.path.dirname(source_path))
         self.source_path = source_path
         self.source_version = source_version
+        self._read_source_version = regular_subtitle_version if regular_source else subtitle_source_version
         with self.state:
             self.source_revision = self.state.revision(source_path)
             # Every destination below is a sibling of the source, so asking about
@@ -127,7 +140,7 @@ class SubtitlePublication:
     def source_unchanged(self):
         return (self.state is not None and self.source_version is not None
                 and self.state.revision(self.source_path) == self.source_revision
-                and subtitle_source_version(self.source_path) == self.source_version)
+                and self._read_source_version(self.source_path) == self.source_version)
 
     def destination_owned(self, path):
         return self.owns_destinations and not os.path.islink(path)
@@ -261,17 +274,12 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
                             os.chmod(temporary, mode)
                         elif os.path.isfile(destination):
                             shutil.copymode(destination, temporary)
-                        staged = (regular_subtitle_version(temporary)
-                                  if rollback_new_on_guard_error or on_version is not None else None)
-                        os.replace(temporary, destination)
-                        if staged is not None:
-                            written = regular_subtitle_version(destination)
-                            # A rename can change ctime. Check that this is the staged file.
-                            if written is not None and written[:4] == staged[:4]:
-                                if rollback_new_on_guard_error:
-                                    installed = written
-                                if on_version is not None:
-                                    on_version(written)
+                        written = _replace_subtitle_file(
+                            temporary, destination, capture_version=rollback_new_on_guard_error or on_version is not None)
+                        if rollback_new_on_guard_error:
+                            installed = written
+                        if written is not None and on_version is not None:
+                            on_version(written)
                         _report_subtitle_publication(on_publish, destination)
                         if after_publish:
                             after_publish()
@@ -1084,7 +1092,8 @@ class SubsyncEngineRunner:
 
     def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False,
             source_version=None, before_publish=None, publication_lock=None, after_publish=None,
-            on_publish=None, publication_guard=None, path_publication_guard=None, destination_guard=None):
+            on_publish=None, publication_guard=None, path_publication_guard=None, destination_guard=None,
+            *, on_overwrite_version=None):
         output_mode = normalize_output_mode(output_mode)
         result = self.result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
 
@@ -1151,6 +1160,7 @@ class SubsyncEngineRunner:
                 generated_path = str(output_path)
                 final_output_path = output_path
                 destination = srt_path if output_mode == OUTPUT_MODE_OVERWRITE else final_engine_output_path
+                written = None
                 with publication_lock or nullcontext() as state:
                     if path_publication_guard is not None:
                         guard = path_publication_guard(str(destination))
@@ -1165,7 +1175,8 @@ class SubsyncEngineRunner:
                                 and not source_version.destination_unchanged(final_engine_output_path)):
                             raise SubtitleDestinationChanged()
                         if output_mode == OUTPUT_MODE_OVERWRITE:
-                            os.replace(str(output_path), srt_path)
+                            written = _replace_subtitle_file(str(output_path), srt_path,
+                                                             capture_version=on_overwrite_version is not None)
                             final_output_path = Path(srt_path)
                             generated_path = None
                         else:
@@ -1175,6 +1186,8 @@ class SubsyncEngineRunner:
                         _report_subtitle_publication(on_publish, final_output_path)
                         if hasattr(state, 'changed'):
                             state.changed(final_output_path)
+                    if output_mode == OUTPUT_MODE_OVERWRITE and on_overwrite_version is not None:
+                        on_overwrite_version(written)
                     if after_publish:
                         after_publish()
 
