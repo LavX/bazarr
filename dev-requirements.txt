@@ -15,6 +15,6 @@ requests-mock
 # test_legendasdivx.py to build brotli-encoded fixtures. It reaches the
 # runtime image transitively via Flask-Compress and py7zr, but a test that
 # imports it deserves its own declaration.
-brotli==1.2.0
+brotli==1.2.1
 ruff==0.16.7
 setuptools
