@@ -1,5 +1,5 @@
 sympy
-vcrpy>=8.3.0
+vcrpy>=9.2.0
 # pytest 9.2.0 changed monkeypatch.setattr undo for dict-backed objects: the
 # settings sections (dynaconf DataDict) serve attributes from dict items, so
 # the old value is no longer recorded and undo deletes the key. Every fixture
